@@ -1,0 +1,22 @@
+# Build output
+frontend/dist/
+frontend/node_modules/
+
+# Go
+backend/woodshop-security
+backend/*.exe
+
+# Runtime data (recordings, HLS, config — bind-mounted in Docker)
+recordings/
+hls/
+config/*.db
+config/*.json
+
+# Env / secrets
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp

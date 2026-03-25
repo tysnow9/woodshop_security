@@ -1,0 +1,19 @@
+services:
+  app:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./recordings:/recordings
+      - ./hls:/hls
+      - ./config:/config
+      - ./frontend/dist:/app/static:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - RECORDINGS_DIR=/recordings
+      - HLS_DIR=/hls
+      - CONFIG_DIR=/config
+      - STATIC_DIR=/app/static
