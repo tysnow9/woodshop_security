@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,8 +25,8 @@ type Camera struct {
 
 // Hardcoded for now — will move to config file
 var cameras = []Camera{
-	{ID: "cam1", Name: "Front Yard", IP: "11.200.0.101", Status: "online"},
-	{ID: "cam2", Name: "Back Yard", IP: "11.200.0.102", Status: "online"},
+	{ID: "cam1", Name: "SE-Driveway", IP: "11.200.0.101", Status: "online"},
+	{ID: "cam2", Name: "NW-Front", IP: "11.200.0.102", Status: "online"},
 }
 
 const rtspUser = "admin"
@@ -72,6 +73,7 @@ func main() {
 
 	app.Use(logger.New(logger.Config{
 		Format: "[${time}] ${status} ${method} ${path}\n",
+		Next:   func(c *fiber.Ctx) bool { return strings.HasPrefix(c.Path(), "/hls/") },
 	}))
 	app.Use(cors.New())
 
@@ -84,9 +86,24 @@ func main() {
 		return c.JSON(cameras)
 	})
 
-	// HLS segments served from disk
+	// HLS playlists: no-cache so hls.js always sees the latest segment list.
+	// Fiber's Static handler caches file metadata for 10s by default, which causes
+	// hls.js to receive stale 304s while FFmpeg is writing new segments every 2s.
+	app.Get("/hls/:cam/:stream/live.m3u8", func(c *fiber.Ctx) error {
+		path := filepath.Join(hlsDir, c.Params("cam"), c.Params("stream"), "live.m3u8")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fiber.ErrNotFound
+		}
+		c.Set("Cache-Control", "no-cache, no-store")
+		c.Set("Content-Type", "application/vnd.apple.mpegurl")
+		return c.Send(data)
+	})
+
+	// HLS segments: immutable once written, cache freely.
 	app.Static("/hls", hlsDir, fiber.Static{
 		Browse: false,
+		MaxAge: 3600,
 	})
 
 	// React SPA

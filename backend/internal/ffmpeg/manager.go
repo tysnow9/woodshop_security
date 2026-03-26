@@ -84,7 +84,7 @@ func run(ctx context.Context, s Stream) error {
 
 	args := []string{
 		"-hide_banner", "-loglevel", "warning",
-		"-rtsp_transport", "tcp",
+		"-rtsp_transport", "udp",
 		"-use_wallclock_as_timestamps", "1",
 		"-i", s.RTSPURL,
 	}
@@ -97,15 +97,22 @@ func run(ctx context.Context, s Stream) error {
 			"-c:a", "aac", "-ar", "22050", "-af", "aresample=async=1",
 		)
 	} else {
-		// Main stream: stream copy — zero CPU, full resolution
-		args = append(args, "-c", "copy")
+		// Main stream: copy video (zero CPU), transcode audio.
+		// The camera's RTSP stream carries AAC without proper ADTS framing headers —
+		// stream-copying results in segments with unspecified sample rate/channels that
+		// browsers cannot decode. Transcoding regenerates proper ADTS-framed AAC-LC.
+		// aresample=async=1 smooths the jittery timestamps the camera produces.
+		args = append(args,
+			"-c:v", "copy",
+			"-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-af", "aresample=async=1",
+		)
 	}
 
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", "2",
-		"-hls_list_size", "6",
-		"-hls_flags", "delete_segments+append_list+omit_endlist",
+		"-hls_time", "1",
+		"-hls_list_size", "8",
+		"-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
 		"-hls_segment_filename", segPat,
 		m3u8,
 	)

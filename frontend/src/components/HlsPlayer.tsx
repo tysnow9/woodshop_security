@@ -14,23 +14,26 @@ interface Props {
   className?: string
   objectFit?: 'cover' | 'contain'
   showLoader?: boolean
+  onMuteBlocked?: () => void
 }
 
 const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
-  { src, startMuted = true, className = '', objectFit = 'contain', showLoader = true },
+  { src, startMuted = true, className = '', objectFit = 'contain', showLoader = true, onMuteBlocked },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const [status, setStatus] = useState<Status>('loading')
 
-  // Expose setMuted so parent can call it directly inside a click handler
-  // (must be synchronous / within user-gesture context for Brave / strict autoplay policies)
   useImperativeHandle(ref, () => ({
     setMuted: (muted: boolean) => {
       if (videoRef.current) videoRef.current.muted = muted
     },
   }))
+
+  // Capture startMuted at mount time only — changes to it should not rebuild the player.
+  // Mute toggling after mount goes through setMuted() via the ref handle.
+  const startMutedRef = useRef(startMuted)
 
   useEffect(() => {
     const video = videoRef.current
@@ -48,21 +51,24 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
 
     if (Hls.isSupported()) {
       const hls = new Hls({
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 6,
-        maxBufferLength: 10,
-        backBufferLength: 30,
+        // 1s segments × liveSyncDurationCount=1 → ~2s target latency.
+        // liveMaxLatencyDurationCount=4 stays well within hls_list_size=8.
+        liveSyncDurationCount: 1,
+        liveMaxLatencyDurationCount: 4,
+        maxBufferLength: 6,
+        backBufferLength: 0,
       })
       hlsRef.current = hls
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         video.play().then(() => {
-          // Apply caller's requested initial mute state after play succeeds.
-          // Note: for browser autoplay policies (e.g. Brave), this may be
-          // silently ignored if there has been no prior user gesture on the page.
-          // The parent should use the HlsPlayerHandle.setMuted() method inside
-          // a click handler for reliable unmuting.
-          if (!startMuted) video.muted = false
+          if (!startMutedRef.current) {
+            video.muted = false
+            // If the browser blocked the unmute (no prior user gesture), notify
+            // the parent so it can sync its muted state back to true — otherwise
+            // the button label is wrong and the user has to click twice.
+            if (video.muted) onMuteBlocked?.()
+          }
           setStatus('playing')
         }).catch(() => {
           // Autoplay blocked entirely — still show as playing (video will be paused)
@@ -80,7 +86,7 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
       video.src = src
       video.addEventListener('loadedmetadata', () => {
         video.play().then(() => {
-          if (!startMuted) video.muted = false
+          if (!startMutedRef.current) video.muted = false
           setStatus('playing')
         }).catch(() => setStatus('playing'))
       })
@@ -90,7 +96,7 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
     }
 
     return destroy
-  }, [src, startMuted])
+  }, [src])
 
   return (
     <div className={`relative bg-black ${className}`}>

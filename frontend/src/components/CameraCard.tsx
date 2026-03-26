@@ -24,7 +24,7 @@ export default function CameraCard({ camera }: Props) {
                  transition-all duration-200 hover:shadow-xl hover:shadow-black/40"
     >
       {/* Video thumbnail — sub stream, muted autoplay */}
-      <div className="relative w-full" style={{ aspectRatio: '16/9' }}>
+      <div className="relative w-full" style={{ aspectRatio: '704/480' }}>
         <HlsPlayer
           src={hlsUrl(camera.id, 'thumb')}
           startMuted

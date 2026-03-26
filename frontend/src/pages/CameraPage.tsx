@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Settings, Radio, Volume2, VolumeX } from 'lucide-react'
+import { ArrowLeft, Settings, Radio, Volume2, VolumeX, Maximize2, Minimize2 } from 'lucide-react'
 import { api, hlsUrl } from '../lib/api'
 import type { Camera } from '../lib/types'
 import HlsPlayer, { type HlsPlayerHandle } from '../components/HlsPlayer'
@@ -9,16 +9,34 @@ export default function CameraPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const [camera, setCamera] = useState<Camera | null>(null)
-  const [muted, setMuted] = useState(true) // start muted — user clicks to enable audio
+  const [muted, setMuted] = useState(() => {
+    try { return localStorage.getItem('nvr_muted') !== 'false' } catch { return true }
+  })
   const playerRef = useRef<HlsPlayerHandle>(null)
+  const videoAreaRef = useRef<HTMLDivElement>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  useEffect(() => {
+    function onFsc() { setIsFullscreen(!!document.fullscreenElement) }
+    document.addEventListener('fullscreenchange', onFsc)
+    return () => document.removeEventListener('fullscreenchange', onFsc)
+  }, [])
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      videoAreaRef.current?.requestFullscreen()
+    }
+  }
 
   useEffect(() => {
     api.cameras.list().then((cams) => {
       setCamera(cams.find((c) => c.id === id) ?? null)
     }).catch(() => {
       const fallback: Record<string, Camera> = {
-        cam1: { id: 'cam1', name: 'Front Yard', ip: '11.200.0.101', status: 'online' },
-        cam2: { id: 'cam2', name: 'Back Yard', ip: '11.200.0.102', status: 'online' },
+        cam1: { id: 'cam1', name: 'SE-Driveway', ip: '11.200.0.101', status: 'online' },
+        cam2: { id: 'cam2', name: 'NW-Front', ip: '11.200.0.102', status: 'online' },
       }
       setCamera(fallback[id] ?? null)
     })
@@ -26,10 +44,9 @@ export default function CameraPage() {
 
   function toggleMute() {
     const newMuted = !muted
-    // Set directly on the DOM element inside this click handler so Brave
-    // recognises it as a user-gesture-initiated unmute (not autoplay).
     playerRef.current?.setMuted(newMuted)
     setMuted(newMuted)
+    try { localStorage.setItem('nvr_muted', String(newMuted)) } catch {}
   }
 
   if (!camera) {
@@ -60,11 +77,18 @@ export default function CameraPage() {
 
         <div className="flex items-center gap-1">
           <button
+            onClick={() => window.open(`http://${camera.ip}`, '_blank', 'noopener,noreferrer')}
+            title="Open Amcrest web UI"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+          >
+            <Settings size={13} />
+            Camera Settings
+          </button>
+
+          <button
             onClick={toggleMute}
             title={muted ? 'Enable audio' : 'Mute'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs transition-colors
-                       hover:bg-zinc-800
-                       text-zinc-400 hover:text-zinc-100"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs transition-colors hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100"
           >
             {muted
               ? <><VolumeX size={14} /><span>Unmute</span></>
@@ -73,24 +97,25 @@ export default function CameraPage() {
           </button>
 
           <button
-            onClick={() => window.open(`http://${camera.ip}`, '_blank', 'noopener,noreferrer')}
-            title="Open Amcrest web UI"
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
           >
-            <Settings size={13} />
-            Camera Settings
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
           </button>
         </div>
       </div>
 
       {/* Main stream video */}
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div ref={videoAreaRef} onDoubleClick={toggleFullscreen} className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <HlsPlayer
           ref={playerRef}
           src={hlsUrl(camera.id, 'main')}
-          startMuted={true}
+          startMuted={muted}
           objectFit="contain"
           className="flex-1 min-h-0 min-w-0 w-full bg-black"
+          onMuteBlocked={() => setMuted(true)}
         />
 
         {/* Timeline placeholder */}

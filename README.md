@@ -1,11 +1,13 @@
 # Woodshop Security
 
-A self-hosted home security NVR (network video recorder) built for Amcrest PoE cameras. Streams and records 24/7 to a local Ubuntu PC with a modern dark-theme web UI accessible from anywhere on the local network.
+A self-hosted home security NVR (network video recorder) built for Amcrest PoE cameras. Streams 24/7 to a local Ubuntu PC with a modern dark-theme web UI accessible from anywhere on the local network.
 
 ## Features
 
-- **Live streaming** — real-time HLS streams from each camera, viewable in any modern browser
+- **Live streaming** — low-latency HLS streams (~3s behind live) from each camera, viewable in any modern browser
 - **Dual-quality streams** — full-resolution main stream (2960×1668) in the detail view, sub-stream thumbnails (704×480) in the grid
+- **Audio** — live audio in the full camera view; mute/unmute with state persisted across sessions
+- **Fullscreen** — fullscreen button or double-click the video; Escape to exit
 - **24/7 recording** *(in progress)* — continuous segmented recordings with configurable rolling retention
 - **DVR timeline** *(in progress)* — scrub back through recordings, jump to any point, return to live
 - **Dark UI** — clean, responsive React interface; works on desktop and tablet
@@ -17,7 +19,7 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 | Layer | Tech |
 |---|---|
 | Backend | Go + [Fiber](https://github.com/gofiber/fiber) |
-| Video pipeline | FFmpeg (HLS segmenter + stream-copy) |
+| Video pipeline | FFmpeg (HLS segmenter, stream-copy video, AAC audio transcode) |
 | Frontend | React + Vite + Tailwind CSS |
 | Metadata | SQLite *(upcoming)* |
 | Deployment | Docker Compose |
@@ -68,14 +70,14 @@ woodshop_security/
 ├── frontend/
 │   └── src/
 │       ├── components/
-│       │   ├── CameraCard.tsx       # Grid thumbnail with gear icon
+│       │   ├── CameraCard.tsx       # Grid thumbnail card
 │       │   ├── CameraGrid.tsx       # Responsive camera grid
 │       │   ├── HlsPlayer.tsx        # hls.js video player component
 │       │   └── Layout.tsx           # Top nav shell
 │       └── pages/
 │           ├── Dashboard.tsx        # Main camera grid view
-│           ├── CameraPage.tsx       # Full-screen camera + timeline
-│           └── Settings.tsx         # Settings page
+│           ├── CameraPage.tsx       # Full camera view + timeline
+│           └── Settings.tsx         # Settings page (UI shell)
 ├── docker-compose.yml
 └── CLAUDE.md                        # Architecture notes and dev context
 ```
@@ -83,4 +85,4 @@ woodshop_security/
 ## Hardware (reference setup)
 
 - **Server:** Intel i7-8700T, 8 GB RAM, 1 TB NVMe, Intel UHD 630 (VAAPI)
-- **Cameras:** 2× Amcrest PoE @ 2960×1668, 20fps, H.264 + AAC
+- **Cameras:** 2× Amcrest PoE @ 2960×1668, 20fps, H.264 + AAC 48kHz
