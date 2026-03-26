@@ -59,6 +59,7 @@ cd frontend && npm run dev
 - ~3s latency vs raw RTSP (tested against iPhone via Scrypted/Home app)
 - FFmpeg process manager: 4 processes (2 cameras × thumb + main), auto-restart on crash, graceful shutdown
 - Settings page UI shell (non-functional, display only)
+- **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio (NW-Front → L, SE-Driveway → R) via Web Audio API; mute/unmute/fullscreen controls
 
 ### ⚠️ Known FFmpeg Warnings (non-fatal)
 ```
@@ -107,10 +108,12 @@ Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries A
 ### Frontend (React + Vite + Tailwind)
 - `src/components/HlsPlayer.tsx` — hls.js player; `forwardRef` exposes `setMuted()` for synchronous unmute inside click handlers (required by browser autoplay policy); `startMuted` captured at mount via ref so mute toggles don't rebuild the player
 - `src/components/CameraCard.tsx` — thumbnail grid card, sub stream, aspect ratio `704/480`
-- `src/components/CameraGrid.tsx` — responsive grid (`minmax(320px, 1fr)`)
+- `src/components/CameraGrid.tsx` — responsive grid (`minmax(320px, 1fr)`); appends `DualCard` when ≥2 cameras present
+- `src/components/DualCard.tsx` — "Combined" grid card; stacked thumbnails (two `704/240` strips = same height as a single `704/480` card); Live + Stereo badges; navigates to `/dual`
 - `src/components/Layout.tsx` — top nav
 - `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
 - `src/pages/CameraPage.tsx` — full view, main stream, mute/fullscreen controls, DVR timeline placeholder
+- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked (`object-contain`); Web Audio API stereo routing (NW-Front → L pan −1, SE-Driveway → R pan +1) via `StereoPannerNode`; `AudioContext` at 48 kHz to match source; graph built lazily on first Unmute click (avoids React StrictMode double-effect pitfall with `createMediaElementSource`)
 - `src/pages/Settings.tsx` — UI shell only (non-functional)
 - `src/lib/api.ts` — fetch wrappers, `hlsUrl()` helper
 - `src/lib/types.ts` — `Camera` type

@@ -1,5 +1,6 @@
 import type { Camera } from '../lib/types'
 import CameraCard from './CameraCard'
+import DualCard from './DualCard'
 
 interface Props {
   cameras: Camera[]
@@ -23,6 +24,7 @@ export default function CameraGrid({ cameras }: Props) {
       {cameras.map((cam) => (
         <CameraCard key={cam.id} camera={cam} />
       ))}
+      {cameras.length >= 2 && <DualCard cameras={cameras} />}
     </div>
   )
 }

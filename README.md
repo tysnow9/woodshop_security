@@ -7,6 +7,7 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 - **Live streaming** — low-latency HLS streams (~3s behind live) from each camera, viewable in any modern browser
 - **Dual-quality streams** — full-resolution main stream (2960×1668) in the detail view, sub-stream thumbnails (704×480) in the grid
 - **Audio** — live audio in the full camera view; mute/unmute with state persisted across sessions
+- **Combined stereo view** — third grid card plays both cameras simultaneously with true L/R stereo audio (NW-Front left, SE-Driveway right) via Web Audio API
 - **Fullscreen** — fullscreen button or double-click the video; Escape to exit
 - **24/7 recording** *(in progress)* — continuous segmented recordings with configurable rolling retention
 - **DVR timeline** *(in progress)* — scrub back through recordings, jump to any point, return to live
@@ -72,11 +73,13 @@ woodshop_security/
 │       ├── components/
 │       │   ├── CameraCard.tsx       # Grid thumbnail card
 │       │   ├── CameraGrid.tsx       # Responsive camera grid
+│       │   ├── DualCard.tsx         # Combined stereo grid card
 │       │   ├── HlsPlayer.tsx        # hls.js video player component
 │       │   └── Layout.tsx           # Top nav shell
 │       └── pages/
 │           ├── Dashboard.tsx        # Main camera grid view
 │           ├── CameraPage.tsx       # Full camera view + timeline
+│           ├── DualCameraPage.tsx   # Combined stereo view
 │           └── Settings.tsx         # Settings page (UI shell)
 ├── docker-compose.yml
 └── CLAUDE.md                        # Architecture notes and dev context
