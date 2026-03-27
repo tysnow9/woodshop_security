@@ -49,30 +49,42 @@ cd frontend && npm run dev
 # Open: http://localhost:5173
 ```
 
-## Current Status (as of 2026-03-26)
+## Current Status (as of 2026-03-27)
 
 ### ✅ Working
-- Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480, no cropping of camera timestamp overlays)
+- Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480)
 - Live main-stream (2960×1668) in full camera view — video stream-copied (zero CPU), audio transcoded to 48kHz AAC
-- Audio working in Firefox and Brave — mute/unmute state persisted in localStorage across navigation
-- Fullscreen button in top bar (Camera Settings → Mute → Fullscreen); double-click video also toggles; Escape exits
+- Audio working in Firefox and Brave — mute/unmute persisted in localStorage
+- Fullscreen — button in top bar or double-click video; Escape exits
 - ~3s latency vs raw RTSP (tested against iPhone via Scrypted/Home app)
 - FFmpeg process manager: 4 processes (2 cameras × thumb + main), auto-restart on crash, graceful shutdown
-- Settings page UI shell (non-functional, display only)
-- **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio (NW-Front → L, SE-Driveway → R) via Web Audio API; mute/unmute/fullscreen controls
+- **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio via Web Audio API
+  - Inline audio settings panel (SlidersHorizontal icon): live balance slider + L/R channel swap
+  - Balance slider always reflects physical L/R speaker orientation regardless of swap state
+  - L/R assignment and balance persisted to `nvr_dual_settings` in localStorage
+  - Always starts muted (one click to hear)
+- **Settings page** — fully functional:
+  - Camera rows (SE-Driveway, NW-Front, Combined) with working show/hide toggles
+  - Drag-to-reorder via GripVertical handles — order persisted to `nvr_card_order`
+  - Combined row shows current L/R assignment, Layers icon, Active/Hidden status
+  - All enabled states persisted to `nvr_enabled` in localStorage
+  - Dashboard reads both keys on mount to render cards in correct order with correct visibility
 
-### ⚠️ Known FFmpeg Warnings (non-fatal)
-```
-[hls] Timestamps are unset in a packet for stream 0
-[rtsp] DTS discontinuity in stream 1
-```
-Both come from the Amcrest camera's RTSP stream having imperfect timestamps. `-use_wallclock_as_timestamps 1` replaces them with wall-clock time. No effect on playback.
+### ⚠️ Known Issues
+- **Combined audio crackle** — intermittent pops/crackle audible when routing both main streams through the Web Audio API (`createMediaElementSource`). The native browser player masks HLS segment-boundary discontinuities; Web Audio API exposes them. The camera's jittery RTSP timestamps are the root cause. `aresample=async=1000` on the FFmpeg side and `latencyHint: 'playback'` on the AudioContext mitigate it but don't eliminate it. Fundamental limitation of Web Audio + HLS at 1-second segment intervals.
+- **FFmpeg warnings (non-fatal):**
+  ```
+  [hls] Timestamps are unset in a packet for stream 0
+  [rtsp] DTS discontinuity in stream 1
+  ```
+  Both from the Amcrest camera's imperfect RTSP timestamps. `-use_wallclock_as_timestamps 1` replaces them with wall-clock time. No effect on playback.
 
 ### 🔜 Next Phases
 1. **Recording** — FFmpeg segment muxer writing 1-hour `.mp4` chunks to `recordings/`, rolling retention cleanup
 2. **Segment indexer** — file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path
 3. **DVR timeline** — backend generates m3u8 playlists for any time range; frontend timeline scrubber
 4. **Settings wired** — camera config, retention period, storage display connected to real backend data
+5. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser, for use without a terminal (production convenience)
 
 ## Architecture
 
@@ -84,9 +96,11 @@ Both come from the Amcrest camera's RTSP stream having imperfect timestamps. `-u
 
 **HLS settings:** 1-second segments (`hls_time 1`), 8-segment rolling window (`hls_list_size 8`), `program_date_time` tags embedded in playlist
 **Input flags:** `-rtsp_transport udp -use_wallclock_as_timestamps 1`
-**Main stream audio:** `-c:a aac -ar 48000 -b:a 128k -af aresample=async=1`
+**Main stream audio:** `-c:a aac -ar 48000 -b:a 128k -af aresample=async=1000`
 
 Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries AAC without proper ADTS framing headers. Stream-copying into MPEG-TS produces segments where ffprobe (and browsers) cannot determine sample rate or channel count. Re-encoding regenerates correct ADTS framing.
+
+Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=1` only allowed 1 sample/second of drift correction, so larger timestamp jumps passed through as audio gaps. `async=1000` gives a ~20ms/second correction budget, keeping audio continuous via stretching/squeezing rather than silence insertion.
 
 ### HLS Latency
 - Camera Frame Interval 20 frames → 1s keyframe interval → 1s segments for stream-copy
@@ -106,17 +120,26 @@ Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries A
 - React SPA static files in production
 
 ### Frontend (React + Vite + Tailwind)
-- `src/components/HlsPlayer.tsx` — hls.js player; `forwardRef` exposes `setMuted()` for synchronous unmute inside click handlers (required by browser autoplay policy); `startMuted` captured at mount via ref so mute toggles don't rebuild the player
-- `src/components/CameraCard.tsx` — thumbnail grid card, sub stream, aspect ratio `704/480`
-- `src/components/CameraGrid.tsx` — responsive grid (`minmax(320px, 1fr)`); appends `DualCard` when ≥2 cameras present
-- `src/components/DualCard.tsx` — "Combined" grid card; stacked thumbnails (two `704/240` strips = same height as a single `704/480` card); Live + Stereo badges; navigates to `/dual`
-- `src/components/Layout.tsx` — top nav
-- `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
-- `src/pages/CameraPage.tsx` — full view, main stream, mute/fullscreen controls, DVR timeline placeholder
-- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked (`object-contain`); Web Audio API stereo routing (NW-Front → L pan −1, SE-Driveway → R pan +1) via `StereoPannerNode`; `AudioContext` at 48 kHz to match source; graph built lazily on first Unmute click (avoids React StrictMode double-effect pitfall with `createMediaElementSource`)
-- `src/pages/Settings.tsx` — UI shell only (non-functional)
 - `src/lib/api.ts` — fetch wrappers, `hlsUrl()` helper
 - `src/lib/types.ts` — `Camera` type
+- `src/lib/dualSettings.ts` — shared `DualSettings` type, `getDualSettings()` / `saveDualSettings()`; also exports `CAM_NAMES` and `OTHER_CAM` mappings used across Combined-related components
+- `src/components/HlsPlayer.tsx` — hls.js player; `forwardRef` exposes `setMuted()` for synchronous unmute inside click handlers (required by browser autoplay policy); `startMuted` captured at mount via ref so mute toggles don't rebuild the player
+- `src/components/CameraCard.tsx` — thumbnail grid card, sub stream, aspect ratio `704/480`
+- `src/components/CameraGrid.tsx` — responsive grid; reads `nvr_card_order` and `nvr_enabled` from localStorage on mount to render cards in saved order with correct visibility
+- `src/components/DualCard.tsx` — "Combined" grid card; stacked thumbnails (two `704/240` strips = same height as a single `704/480` card); reads `dualSettings` to show correct L/R assignment in footer
+- `src/components/Layout.tsx` — top nav
+- `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
+- `src/pages/CameraPage.tsx` — full camera view, main stream, mute/fullscreen, DVR timeline placeholder
+- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped
+- `src/pages/Settings.tsx` — camera/combined rows with drag-to-reorder (GripVertical, HTML5 DnD) and functional show/hide toggles; saves to `nvr_card_order` and `nvr_enabled`
+
+### localStorage Keys
+| Key | Type | Description |
+|-----|------|-------------|
+| `nvr_muted` | `'true'/'false'` | Mute state, persisted across navigation |
+| `nvr_card_order` | `string[]` JSON | Dashboard card order: e.g. `["cam2","cam1","combined"]` |
+| `nvr_enabled` | `Record<string,bool>` JSON | Show/hide state for each card; `{cam1, cam2, combined}` |
+| `nvr_dual_settings` | `DualSettings` JSON | Combined view: `{leftCam, balance}` |
 
 ### Deployment
 - Docker Compose: single `app` service, Go binary + static React build
@@ -129,3 +152,4 @@ Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries A
 - Snapshot capture
 - External drive support
 - VAAPI H.265 recording toggle (halves storage, ~454 GB for 14 days)
+- One-click launch: `.desktop` launcher or shell script that starts backend + frontend and opens the browser — avoids needing two terminals for day-to-day use (lower priority while active dev is ongoing; terminal output is useful for debugging)

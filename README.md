@@ -6,13 +6,14 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 
 - **Live streaming** — low-latency HLS streams (~3s behind live) from each camera, viewable in any modern browser
 - **Dual-quality streams** — full-resolution main stream (2960×1668) in the detail view, sub-stream thumbnails (704×480) in the grid
-- **Audio** — live audio in the full camera view; mute/unmute with state persisted across sessions
-- **Combined stereo view** — third grid card plays both cameras simultaneously with true L/R stereo audio (NW-Front left, SE-Driveway right) via Web Audio API
-- **Fullscreen** — fullscreen button or double-click the video; Escape to exit
+- **Audio** — live audio in the full camera view; mute/unmute state persisted across sessions
+- **Combined stereo view** — third grid card plays both cameras simultaneously with true L/R stereo audio via Web Audio API; inline balance slider and channel swap controls
+- **Fullscreen** — button in top bar or double-click the video; Escape to exit
+- **Settings** — reorder and show/hide camera cards via drag-and-drop; Combined view L/R assignment and balance persistent across sessions
 - **24/7 recording** *(in progress)* — continuous segmented recordings with configurable rolling retention
 - **DVR timeline** *(in progress)* — scrub back through recordings, jump to any point, return to live
 - **Dark UI** — clean, responsive React interface; works on desktop and tablet
-- **Camera settings** — gear icon on each card opens the native Amcrest web UI directly
+- **Camera web UI** — gear icon on each card opens the native Amcrest web UI directly
 - **Docker-ready** — single Compose file with VAAPI hardware acceleration passthrough
 
 ## Stack
@@ -72,15 +73,19 @@ woodshop_security/
 │   └── src/
 │       ├── components/
 │       │   ├── CameraCard.tsx       # Grid thumbnail card
-│       │   ├── CameraGrid.tsx       # Responsive camera grid
+│       │   ├── CameraGrid.tsx       # Responsive camera grid (order + visibility from localStorage)
 │       │   ├── DualCard.tsx         # Combined stereo grid card
 │       │   ├── HlsPlayer.tsx        # hls.js video player component
 │       │   └── Layout.tsx           # Top nav shell
+│       ├── lib/
+│       │   ├── api.ts               # Fetch wrappers, hlsUrl() helper
+│       │   ├── dualSettings.ts      # Combined view settings (L/R assignment, balance)
+│       │   └── types.ts             # Camera type
 │       └── pages/
 │           ├── Dashboard.tsx        # Main camera grid view
-│           ├── CameraPage.tsx       # Full camera view + timeline
-│           ├── DualCameraPage.tsx   # Combined stereo view
-│           └── Settings.tsx         # Settings page (UI shell)
+│           ├── CameraPage.tsx       # Full camera view + timeline placeholder
+│           ├── DualCameraPage.tsx   # Combined stereo view + inline audio settings
+│           └── Settings.tsx         # Camera order, visibility, and combined settings
 ├── docker-compose.yml
 └── CLAUDE.md                        # Architecture notes and dev context
 ```

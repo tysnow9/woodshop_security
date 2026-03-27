@@ -104,7 +104,12 @@ func run(ctx context.Context, s Stream) error {
 		// aresample=async=1 smooths the jittery timestamps the camera produces.
 		args = append(args,
 			"-c:v", "copy",
-			"-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-af", "aresample=async=1",
+			// async=1000: allow up to ~20ms/s of timestamp-drift correction via
+			// stretching/squeezing rather than silence insertion. The camera's jittery
+			// RTSP timestamps can produce small gaps that become audible clicks/pops
+			// when routed through the Web Audio API; larger async budget keeps the
+			// audio stream continuous without the silence-insertion artifacts of async=1.
+			"-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-af", "aresample=async=1000",
 		)
 	}
 
