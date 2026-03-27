@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Settings, Radio, Volume2, VolumeX, Maximize2, Minimize2 } from 'lucide-react'
+import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch'
 import { api, hlsUrl } from '../lib/api'
 import type { Camera } from '../lib/types'
 import HlsPlayer, { type HlsPlayerHandle } from '../components/HlsPlayer'
@@ -15,6 +16,7 @@ export default function CameraPage() {
   const playerRef = useRef<HlsPlayerHandle>(null)
   const videoAreaRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const fullscreenSupported = !!(document.fullscreenEnabled)
 
   useEffect(() => {
     function onFsc() { setIsFullscreen(!!document.fullscreenElement) }
@@ -96,27 +98,36 @@ export default function CameraPage() {
             }
           </button>
 
-          <button
-            onClick={toggleFullscreen}
-            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-          >
-            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
-          </button>
+          {fullscreenSupported && (
+            <button
+              onClick={toggleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+            >
+              {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
+            </button>
+          )}
         </div>
       </div>
 
       {/* Main stream video */}
-      <div ref={videoAreaRef} onDoubleClick={toggleFullscreen} className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        <HlsPlayer
-          ref={playerRef}
-          src={hlsUrl(camera.id, 'main')}
-          startMuted={muted}
-          objectFit="contain"
-          className="flex-1 min-h-0 min-w-0 w-full bg-black"
-          onMuteBlocked={() => setMuted(true)}
-        />
+      <div ref={videoAreaRef} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <TransformWrapper minScale={1} maxScale={8} limitToBounds={true}>
+          <TransformComponent
+            wrapperStyle={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }}
+            contentStyle={{ width: '100%', height: '100%' }}
+          >
+            <HlsPlayer
+              ref={playerRef}
+              src={hlsUrl(camera.id, 'main')}
+              startMuted={muted}
+              objectFit="contain"
+              className="w-full h-full bg-black"
+              onMuteBlocked={() => setMuted(true)}
+            />
+          </TransformComponent>
+        </TransformWrapper>
 
         {/* Timeline placeholder */}
         <div className="h-14 bg-zinc-900 border-t border-zinc-800 flex items-center px-4 gap-3 shrink-0">

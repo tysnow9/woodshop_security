@@ -38,7 +38,7 @@ func rtspURL(ip, subtype string) string {
 
 func main() {
 	port := getEnv("PORT", "8080")
-	staticDir := getEnv("STATIC_DIR", "./static")
+	staticDir := getEnv("STATIC_DIR", "../frontend/dist")
 	hlsDir := getEnv("HLS_DIR", "./hls")
 
 	// Build FFmpeg stream list — sub (thumb) + main per camera

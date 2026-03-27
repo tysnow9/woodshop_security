@@ -5,6 +5,7 @@ import {
   ArrowLeft, ArrowLeftRight, Radio, SlidersHorizontal,
   Volume2, VolumeX, Maximize2, Minimize2, Loader, WifiOff,
 } from 'lucide-react'
+import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch'
 import { hlsUrl } from '../lib/api'
 import { getDualSettings, saveDualSettings, CAM_NAMES, OTHER_CAM } from '../lib/dualSettings'
 
@@ -75,8 +76,9 @@ export default function DualCameraPage() {
 
   const [topStatus, setTopStatus] = useState<Status>('loading')
   const [bottomStatus, setBottomStatus] = useState<Status>('loading')
-  const [muted, setMuted] = useState(true) // always start muted; one click to hear
+  const [muted, setMuted] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const fullscreenSupported = !!(document.fullscreenEnabled)
   const [showSettings, setShowSettings] = useState(false)
   const [balance, setBalanceState] = useState(settings.current.balance)
   const [swapped, setSwapped] = useState(false) // true = top video sends to R channel
@@ -133,17 +135,15 @@ export default function DualCameraPage() {
     return () => destroyers.forEach((d) => d())
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Must be called from a click handler — createMediaElementSource requires a user
-  // gesture and can only be called once per element (StrictMode double-effect would
-  // permanently taint the elements).
+  // Must be called from a click handler: createMediaElementSource requires a user gesture
+  // and can only be called once per element (StrictMode would permanently taint them).
   function connectAudio(topVideo: HTMLVideoElement, bottomVideo: HTMLVideoElement) {
     const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'playback' })
     const masterGain = ctx.createGain()
     masterGain.gain.value = 0
     masterGain.connect(ctx.destination)
 
-    // Gain nodes are wired to topVideo/bottomVideo (fixed), not physical L/R.
-    // Negate balance when swapped — see applyBalance().
+    // Gain nodes are wired to topVideo/bottomVideo (fixed), not physical L/R — see applyBalance().
     const eff = swapped ? -balance : balance
     const leftChGain = ctx.createGain()
     leftChGain.gain.value = Math.min(1, 1 - eff)
@@ -164,8 +164,6 @@ export default function DualCameraPage() {
     ctx.createMediaElementSource(topVideo).connect(panTop).connect(leftChGain).connect(masterGain)
     ctx.createMediaElementSource(bottomVideo).connect(panBottom).connect(rightChGain).connect(masterGain)
 
-    // createMediaElementSource disconnects the video from the browser's native audio
-    // output — unmuting here routes it through the Web Audio graph instead.
     topVideo.muted = false
     bottomVideo.muted = false
 
@@ -191,24 +189,35 @@ export default function DualCameraPage() {
     }
   }, [])
 
-  function toggleMute() {
+  async function toggleMute() {
     const newMuted = !muted
+    const topVideo = topVideoRef.current
+    const bottomVideo = bottomVideoRef.current
+
     if (!audioConnected.current && !newMuted) {
-      const topVideo = topVideoRef.current
-      const bottomVideo = bottomVideoRef.current
       if (topVideo && bottomVideo) {
         try { connectAudio(topVideo, bottomVideo) }
         catch (e) { console.error('[DualCameraPage] Web Audio setup failed:', e) }
       }
     }
+
+    // Toggle video.muted synchronously (before any await) to keep the user-gesture context.
+    // Safari's createMediaElementSource() doesn't fully disconnect native audio output,
+    // so this is required for mute to work reliably on Safari/iOS.
+    if (audioConnected.current) {
+      if (topVideo) topVideo.muted = newMuted
+      if (bottomVideo) bottomVideo.muted = newMuted
+    }
+
     const ctx = audioCtxRef.current
     const gain = gainRef.current
     if (ctx && gain) {
-      if (ctx.state === 'suspended') ctx.resume()
+      if (ctx.state === 'suspended') await ctx.resume()
+      gain.gain.cancelScheduledValues(0)
       if (newMuted) {
-        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.05)
+        gain.gain.value = 0
       } else {
-        gain.gain.setValueAtTime(gain.gain.value, ctx.currentTime)
+        gain.gain.setValueAtTime(0, ctx.currentTime)
         gain.gain.linearRampToValueAtTime(1, ctx.currentTime + 0.08)
       }
     }
@@ -283,14 +292,16 @@ export default function DualCameraPage() {
               : <><Volume2 size={14} /><span>Mute</span></>
             }
           </button>
-          <button
-            onClick={toggleFullscreen}
-            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-          >
-            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
-          </button>
+          {fullscreenSupported && (
+            <button
+              onClick={toggleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+            >
+              {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -340,22 +351,28 @@ export default function DualCameraPage() {
       {/* Dual video area — stacked, letterboxed */}
       <div
         ref={videoAreaRef}
-        onDoubleClick={toggleFullscreen}
         className="flex-1 flex flex-col min-h-0 overflow-hidden"
       >
-        <VideoPanel
-          videoRef={topVideoRef}
-          status={topStatus}
-          label={camTop.name}
-          channel={swapped ? 'R' : 'L'}
-          borderBottom
-        />
-        <VideoPanel
-          videoRef={bottomVideoRef}
-          status={bottomStatus}
-          label={camBottom.name}
-          channel={swapped ? 'L' : 'R'}
-        />
+        <TransformWrapper minScale={1} maxScale={8} limitToBounds={true}>
+          <TransformComponent
+            wrapperStyle={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }}
+            contentStyle={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}
+          >
+            <VideoPanel
+              videoRef={topVideoRef}
+              status={topStatus}
+              label={camTop.name}
+              channel={swapped ? 'R' : 'L'}
+              borderBottom
+            />
+            <VideoPanel
+              videoRef={bottomVideoRef}
+              status={bottomStatus}
+              label={camBottom.name}
+              channel={swapped ? 'L' : 'R'}
+            />
+          </TransformComponent>
+        </TransformWrapper>
       </div>
 
       {/* Timeline placeholder */}

@@ -54,10 +54,12 @@ cd frontend && npm run dev
 ### ✅ Working
 - Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480)
 - Live main-stream (2960×1668) in full camera view — video stream-copied (zero CPU), audio transcoded to 48kHz AAC
-- Audio working in Firefox and Brave — mute/unmute persisted in localStorage
-- Fullscreen — button in top bar or double-click video; Escape exits
+- Audio working in all browsers including Safari — mute/unmute persisted in localStorage
+- Fullscreen — button in top bar; Escape exits; button hidden on iOS (Safari doesn't support `requestFullscreen` on divs)
+- Zoom & pan — pinch/scroll to zoom (1×–8×), drag to pan, in both full camera view and combined view; works with trackpad, mouse, and touch via `react-zoom-pan-pinch`
 - ~3s latency vs raw RTSP (tested against iPhone via Scrypted/Home app)
 - FFmpeg process manager: 4 processes (2 cameras × thumb + main), auto-restart on crash, graceful shutdown
+- **LAN access** — Go backend binds `0.0.0.0:8080`; accessible from any device on the home network after `npm run build`; tested on macOS Safari, iOS Safari, and Windows browsers
 - **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio via Web Audio API
   - Inline audio settings panel (SlidersHorizontal icon): live balance slider + L/R channel swap
   - Balance slider always reflects physical L/R speaker orientation regardless of swap state
@@ -111,7 +113,7 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 `live.m3u8` playlists are served with a **custom no-cache handler** — `Cache-Control: no-cache, no-store`, read directly from disk via `os.ReadFile`. Fiber's default static handler caches file metadata for 10 seconds, which caused hls.js to receive stale 304 responses for up to 10 seconds while FFmpeg wrote new segments every second (manifested as stream freezing every ~10s). `.ts` segments use the standard static handler with `MaxAge: 3600` since they are immutable once written.
 
 ### Backend (Go / Fiber)
-- `backend/main.go` — entry point, Fiber routes, FFmpeg manager startup
+- `backend/main.go` — entry point, Fiber routes, FFmpeg manager startup; `STATIC_DIR` defaults to `../frontend/dist` so `go run .` serves the built SPA directly
 - `backend/internal/ffmpeg/manager.go` — FFmpeg subprocess lifecycle (start, monitor, restart with exponential backoff)
 - `GET /api/cameras` — camera list
 - `GET /api/health` — health check
@@ -129,8 +131,8 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 - `src/components/DualCard.tsx` — "Combined" grid card; stacked thumbnails (two `704/240` strips = same height as a single `704/480` card); reads `dualSettings` to show correct L/R assignment in footer
 - `src/components/Layout.tsx` — top nav
 - `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
-- `src/pages/CameraPage.tsx` — full camera view, main stream, mute/fullscreen, DVR timeline placeholder
-- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped
+- `src/pages/CameraPage.tsx` — full camera view, main stream, mute/fullscreen, zoom/pan, DVR timeline placeholder
+- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped; mute also sets `video.muted` directly because Safari's `createMediaElementSource()` doesn't fully disconnect native audio output
 - `src/pages/Settings.tsx` — camera/combined rows with drag-to-reorder (GripVertical, HTML5 DnD) and functional show/hide toggles; saves to `nvr_card_order` and `nvr_enabled`
 
 ### localStorage Keys

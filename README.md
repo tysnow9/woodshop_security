@@ -6,13 +6,15 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 
 - **Live streaming** — low-latency HLS streams (~3s behind live) from each camera, viewable in any modern browser
 - **Dual-quality streams** — full-resolution main stream (2960×1668) in the detail view, sub-stream thumbnails (704×480) in the grid
-- **Audio** — live audio in the full camera view; mute/unmute state persisted across sessions
+- **Audio** — live audio in the full camera view; mute/unmute state persisted across sessions; works in all browsers including Safari
 - **Combined stereo view** — third grid card plays both cameras simultaneously with true L/R stereo audio via Web Audio API; inline balance slider and channel swap controls
-- **Fullscreen** — button in top bar or double-click the video; Escape to exit
+- **Zoom & pan** — pinch or scroll to zoom (up to 8×), drag to pan in full camera and combined views; trackpad, mouse, and touch all supported
+- **Fullscreen** — button in top bar; Escape to exit
 - **Settings** — reorder and show/hide camera cards via drag-and-drop; Combined view L/R assignment and balance persistent across sessions
+- **Cross-device access** — accessible from any device on the local network at `http://<server-ip>:8080`; tested on macOS, iOS, and Windows
 - **24/7 recording** *(in progress)* — continuous segmented recordings with configurable rolling retention
 - **DVR timeline** *(in progress)* — scrub back through recordings, jump to any point, return to live
-- **Dark UI** — clean, responsive React interface; works on desktop and tablet
+- **Dark UI** — clean, responsive React interface; works on desktop and mobile
 - **Camera web UI** — gear icon on each card opens the native Amcrest web UI directly
 - **Docker-ready** — single Compose file with VAAPI hardware acceleration passthrough
 
@@ -50,13 +52,19 @@ npm run dev
 
 Open **http://localhost:5173**
 
+### LAN access (no Docker)
+
+```bash
+cd frontend && npm run build
+cd backend && go run .
+```
+
+Open **http://&lt;server-ip&gt;:8080** from any device on the network.
+
 ### Production (Docker)
 
 ```bash
-# Build the frontend first
 cd frontend && npm run build && cd ..
-
-# Run with Docker Compose
 docker compose up -d
 ```
 
