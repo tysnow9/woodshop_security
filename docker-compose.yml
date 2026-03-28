@@ -4,7 +4,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./recordings:/recordings
+      - /nvr:/recordings
       - ./hls:/hls
       - ./config:/config
       - ./frontend/dist:/app/static:ro
