@@ -49,9 +49,9 @@ A self-hosted home security camera system for Amcrest PoE cameras. Captures RTSP
 - **Main stream at 5120 Kbps CBR, stream-copy:** ~2.3 GB/hour per camera
 - **7 days × 2 cameras ≈ 768 GB** ✓ within 875 GB available
 - **Recording method:** Camera-side NAS recording via NFS (see Architecture below)
-- **NFS export:** `/nvr` on the Ubuntu server, symlinked as `recordings/` in the project directory
-  - cam1 writes to `/nvr/cam1/`, cam2 writes to `/nvr/cam2/`
+- **NFS export:** `/nvr` on the Ubuntu server — cam1 writes to `/nvr/cam1/`, cam2 to `/nvr/cam2/`
   - `/etc/exports`: `/nvr *(rw,sync,no_subtree_check,no_root_squash,insecure)`
+  - `/nvr` is outside the project directory to avoid VSCode file watcher noise
 
 ## Dev Workflow
 ```bash
@@ -185,7 +185,7 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 
 ### Deployment
 - Docker Compose: single `app` service, Go binary + static React build
-- Bind mounts: `./recordings`, `./hls`, `./config`, `./frontend/dist`
+- Bind mounts: `/nvr:/recordings`, `./hls`, `./config`, `./frontend/dist`
 
 ## Decisions & Lessons Learned
 
