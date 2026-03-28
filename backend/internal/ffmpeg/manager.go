@@ -101,22 +101,31 @@ func run(ctx context.Context, s Stream) error {
 		// The camera's RTSP stream carries AAC without proper ADTS framing headers —
 		// stream-copying results in segments with unspecified sample rate/channels that
 		// browsers cannot decode. Transcoding regenerates proper ADTS-framed AAC-LC.
-		// aresample=async=1 smooths the jittery timestamps the camera produces.
+		// async=1000: allow up to ~20ms/s of timestamp-drift correction via
+		// stretching/squeezing rather than silence insertion. The camera's jittery
+		// RTSP timestamps can produce small gaps that become audible clicks/pops
+		// when routed through the Web Audio API; larger async budget keeps the
+		// audio stream continuous without the silence-insertion artifacts of async=1.
 		args = append(args,
 			"-c:v", "copy",
-			// async=1000: allow up to ~20ms/s of timestamp-drift correction via
-			// stretching/squeezing rather than silence insertion. The camera's jittery
-			// RTSP timestamps can produce small gaps that become audible clicks/pops
-			// when routed through the Web Audio API; larger async budget keeps the
-			// audio stream continuous without the silence-insertion artifacts of async=1.
 			"-c:a", "aac", "-ar", "48000", "-b:a", "128k", "-af", "aresample=async=1000",
 		)
 	}
 
+	// Thumb stream transcodes so FFmpeg can insert keyframes freely — 1s segments.
+	// Main stream copies video verbatim — segments can only split at camera keyframes.
+	// Camera Frame Interval is 60 frames (3s at 20fps), so hls_time must be 3.
+	hlsTime := "1"
+	hlsListSize := "8"
+	if !s.Transcode {
+		hlsTime = "3"
+		hlsListSize = "5"
+	}
+
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", "1",
-		"-hls_list_size", "8",
+		"-hls_time", hlsTime,
+		"-hls_list_size", hlsListSize,
 		"-hls_flags", "delete_segments+append_list+omit_endlist+program_date_time",
 		"-hls_segment_filename", segPat,
 		m3u8,

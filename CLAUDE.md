@@ -13,7 +13,7 @@ A self-hosted home security camera system for Amcrest PoE cameras. Captures RTSP
 - **OS:** Ubuntu 25.10 (questing)
 
 ### Cameras
-- **Model:** Amcrest PoE (~3K)
+- **Model:** Amcrest IP5M-T1277EB-AI (5MP PoE AI Turret)
 - **Count:** 2 (expandable)
 - **Names:** `SE-Driveway` (cam1), `NW-Front` (cam2)
 - **IPs:** `11.200.0.101` (cam1), `11.200.0.102` (cam2)
@@ -24,19 +24,31 @@ A self-hosted home security camera system for Amcrest PoE cameras. Captures RTSP
 ### Confirmed Stream Details
 | Stream | Resolution | FPS | Video | Audio |
 |--------|-----------|-----|-------|-------|
-| Main (`subtype=0`) | 2960×1668 | 20fps | H.264 | AAC-LC mono, 48kHz |
+| Main (`subtype=0`) | 2960×1668 | 20fps | H.264 CBR | AAC-LC mono, 64kHz (camera native) |
 | Sub (`subtype=1`) | 704×480 | 20fps | H.264 | AAC-LC mono, 8kHz |
 
-**Measured main stream bitrate:** ~3 Mbps
+**Camera main stream bitrate:** 5120 Kb/s CBR
 
-### Important Camera Settings (Amcrest UI)
-- **Audio sample rate:** 48000 Hz — changed from camera default 64kHz; non-standard rates cause browsers to silently reject AAC and FFmpeg to drop audio when stream-copying to MPEG-TS
-- **Frame Interval:** 20 frames (= 1 second at 20fps) — controls keyframe/GOP interval; determines HLS segment duration when stream-copying video (FFmpeg can only cut at keyframes)
+### Camera Settings (Amcrest Web UI)
+- **Video encode mode:** H.264 — do not switch to H.265; see Decisions below
+- **Bit rate:** 5120 Kb/s, CBR — switched from VBR to eliminate the I-frame quality pulse visible in daytime scenes (VBR allocates extra bits to keyframes, causing a brightness/detail flash every GOP)
+- **Frame Interval:** 60 frames (= 3 seconds at 20fps) — controls keyframe/GOP interval; determines HLS segment duration when stream-copying video (FFmpeg can only cut at keyframes); must stay at 60 to match `hls_time 3` in backend
+- **Audio sample rate:** 64kHz (camera default, kept as-is) — FFmpeg resamples to 48kHz during audio transcode; non-standard but handled cleanly by `aresample=async=1000`
+- **Audio noise filter:** Disabled (kept as-is)
+- **Microphone volume:** 50 (kept as-is)
+- **Max connections:** 10 — covers our 2 FFmpeg processes per camera + Scrypted with headroom
+
+### Network / Connection Settings (per camera)
+- TCP Port: 37777, UDP Port: 37778, HTTP: 80, RTSP: 554, HTTPS: 443
+- RTSP transport: UDP — optimal for wired PoE LAN (lowest latency, negligible packet loss)
+- RTMP not used — push protocol for external platforms, not relevant to our pipeline
+- ONVIF not used — management layer that still uses RTSP underneath; no benefit over direct RTSP
 
 ## Storage Plan
-- **Retention:** 7 days (configurable in UI — not yet wired to backend)
-- **Main stream at ~3 Mbps, stream-copy:** ~1.35 GB/hour per camera
-- **7 days × 2 cameras = ~454 GB** ✓ well within 875 GB available
+- **Retention:** 7 days
+- **Main stream at 5120 Kbps CBR, stream-copy:** ~2.3 GB/hour per camera
+- **7 days × 2 cameras ≈ 768 GB** ✓ within 875 GB available
+- **Recording method:** Camera-side NAS recording via Samba (see Next Phases)
 
 ## Dev Workflow
 ```bash
@@ -49,7 +61,7 @@ cd frontend && npm run dev
 # Open: http://localhost:5173
 ```
 
-## Current Status (as of 2026-03-27)
+## Current Status (as of 2026-03-28)
 
 ### ✅ Working
 - Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480)
@@ -57,7 +69,7 @@ cd frontend && npm run dev
 - Audio working in all browsers including Safari — mute/unmute persisted in localStorage
 - Fullscreen — button in top bar; Escape exits; button hidden on iOS (Safari doesn't support `requestFullscreen` on divs)
 - Zoom & pan — pinch/scroll to zoom (1×–8×), drag to pan, in both full camera view and combined view; works with trackpad, mouse, and touch via `react-zoom-pan-pinch`
-- ~3s latency vs raw RTSP (tested against iPhone via Scrypted/Home app)
+- ~6s latency vs raw RTSP (3s segments + hls.js liveSyncDurationCount:1; increased from ~3s when Frame Interval changed from 20→60 to fix I-frame flash)
 - FFmpeg process manager: 4 processes (2 cameras × thumb + main), auto-restart on crash, graceful shutdown
 - **LAN access** — Go backend binds `0.0.0.0:8080`; accessible from any device on the home network after `npm run build`; tested on macOS Safari, iOS Safari, and Windows browsers
 - **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio via Web Audio API
@@ -73,7 +85,7 @@ cd frontend && npm run dev
   - Dashboard reads both keys on mount to render cards in correct order with correct visibility
 
 ### ⚠️ Known Issues
-- **Combined audio crackle** — intermittent pops/crackle audible when routing both main streams through the Web Audio API (`createMediaElementSource`). The native browser player masks HLS segment-boundary discontinuities; Web Audio API exposes them. The camera's jittery RTSP timestamps are the root cause. `aresample=async=1000` on the FFmpeg side and `latencyHint: 'playback'` on the AudioContext mitigate it but don't eliminate it. Fundamental limitation of Web Audio + HLS at 1-second segment intervals.
+- **Combined audio crackle** — intermittent pops/crackle audible when routing both main streams through the Web Audio API (`createMediaElementSource`). The native browser player masks HLS segment-boundary discontinuities; Web Audio API exposes them. The camera's jittery RTSP timestamps are the root cause. `aresample=async=1000` on the FFmpeg side and `latencyHint: 'playback'` on the AudioContext mitigate it but don't eliminate it. Fundamental limitation of Web Audio + HLS; moving to 3-second segments may reduce frequency of crackle vs. 1-second segments.
 - **FFmpeg warnings (non-fatal):**
   ```
   [hls] Timestamps are unset in a packet for stream 0
@@ -82,13 +94,28 @@ cd frontend && npm run dev
   Both from the Amcrest camera's imperfect RTSP timestamps. `-use_wallclock_as_timestamps 1` replaces them with wall-clock time. No effect on playback.
 
 ### 🔜 Next Phases
-1. **Recording** — FFmpeg segment muxer writing 1-hour `.mp4` chunks to `recordings/`, rolling retention cleanup
-2. **Segment indexer** — file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path
-3. **DVR timeline** — backend generates m3u8 playlists for any time range; frontend timeline scrubber
-4. **Settings wired** — camera config, retention period, storage display connected to real backend data
-5. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser, for use without a terminal (production convenience)
+1. **Ubuntu as NAS** — install Samba, expose `recordings/` as an SMB share, point both cameras at it via Setup → Storage → Destination → NAS in the Amcrest web UI; verify file format cameras write (expect `.mp4`)
+2. **Recording indexer** — backend file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path; expose `GET /api/recordings?cam=cam1&date=2026-03-28`
+3. **Playback UI** — calendar/timeline picker in frontend; native `<video>` element for `.mp4` playback (no HLS needed — browsers seek `.mp4` natively via HTTP range requests)
+4. **Settings wired** — camera config, retention period, storage usage connected to real backend data
+5. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser
 
 ## Architecture
+
+### Live Streaming vs Recording (separation of concerns)
+These are deliberately separate pipelines:
+
+```
+Camera ──RTSP──► FFmpeg ──► HLS segments ──► browser  (live, ~3s latency)
+Camera ──SMB───► Ubuntu NAS (recordings/)              (recording, camera-managed)
+                     └──► backend indexes files ──► browser  (playback)
+```
+
+**Live streaming:** FFmpeg pulls RTSP, muxes to HLS. Browser plays via hls.js. ~3s latency, no recording logic in this path.
+
+**Recording:** Cameras write directly to Ubuntu Samba share using their built-in NAS client. Recording continues even if our backend is down. Our backend is read-only for recordings.
+
+**Playback:** Backend scans recording files, serves index API + file bytes (HTTP range requests). Frontend uses native `<video>` for `.mp4` — full seek support, no HLS required.
 
 ### FFmpeg Process Design (per camera)
 | Process | Input | Output | Notes |
@@ -96,7 +123,8 @@ cd frontend && npm run dev
 | `{cam}-thumb` | sub stream (subtype=1) | HLS to `hls/{cam}/thumb/` | libx264 ultrafast + AAC 22050Hz transcode |
 | `{cam}-main` | main stream (subtype=0) | HLS to `hls/{cam}/main/` | video stream-copy, audio transcoded to 48kHz AAC |
 
-**HLS settings:** 1-second segments (`hls_time 1`), 8-segment rolling window (`hls_list_size 8`), `program_date_time` tags embedded in playlist
+**HLS settings (thumb):** 1-second segments (`hls_time 1`), 8-segment rolling window (`hls_list_size 8`), `program_date_time` tags — thumb transcodes so FFmpeg inserts keyframes freely
+**HLS settings (main):** 3-second segments (`hls_time 3`), 5-segment rolling window (`hls_list_size 5`), `program_date_time` tags — stream-copy requires segment boundaries to align with camera keyframes (Frame Interval 60 = 3s GOP)
 **Input flags:** `-rtsp_transport udp -use_wallclock_as_timestamps 1`
 **Main stream audio:** `-c:a aac -ar 48000 -b:a 128k -af aresample=async=1000`
 
@@ -105,12 +133,20 @@ Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries A
 Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=1` only allowed 1 sample/second of drift correction, so larger timestamp jumps passed through as audio gaps. `async=1000` gives a ~20ms/second correction budget, keeping audio continuous via stretching/squeezing rather than silence insertion.
 
 ### HLS Latency
-- Camera Frame Interval 20 frames → 1s keyframe interval → 1s segments for stream-copy
-- `hls_time 1` + `hls_list_size 8` → 8 seconds of playlist window
-- hls.js `liveSyncDurationCount: 1` → ~2s behind live edge → ~3s total vs raw RTSP
+- Camera Frame Interval 60 frames → 3s keyframe interval → 3s segments for stream-copy
+- `hls_time 3` + `hls_list_size 5` → 15 seconds of playlist window
+- hls.js `liveSyncDurationCount: 1` → ~6s behind live edge → ~6s total vs raw RTSP
 
 ### HLS Serving (critical detail)
 `live.m3u8` playlists are served with a **custom no-cache handler** — `Cache-Control: no-cache, no-store`, read directly from disk via `os.ReadFile`. Fiber's default static handler caches file metadata for 10 seconds, which caused hls.js to receive stale 304 responses for up to 10 seconds while FFmpeg wrote new segments every second (manifested as stream freezing every ~10s). `.ts` segments use the standard static handler with `MaxAge: 3600` since they are immutable once written.
+
+### Why HLS and not WebRTC/RTMP/DASH
+- Browsers cannot speak RTSP natively
+- **HLS** — HTTP-based, universal browser support via hls.js, ~3s latency, proven for NVR use; correct choice
+- **WebRTC** — sub-second latency but requires signaling server, STUN/TURN, significant complexity; not justified for local LAN security camera viewing
+- **RTMP** — camera push protocol for streaming to YouTube etc.; not applicable to our pull-based pipeline
+- **DASH** — similar to HLS with more complexity; no advantage here
+- **LL-HLS** — Apple's low-latency HLS extension (~1–2s); viable future upgrade if latency becomes a concern
 
 ### Backend (Go / Fiber)
 - `backend/main.go` — entry point, Fiber routes, FFmpeg manager startup; `STATIC_DIR` defaults to `../frontend/dist` so `go run .` serves the built SPA directly
@@ -146,12 +182,31 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 ### Deployment
 - Docker Compose: single `app` service, Go binary + static React build
 - Bind mounts: `./recordings`, `./hls`, `./config`, `./frontend/dist`
-- VAAPI device passthrough for future H.265 transcode
+
+## Decisions & Lessons Learned
+
+### H.265 — tried and reverted
+Switched NW-Front to H.265 at the camera to explore storage/quality gains. **Broke the app immediately:** hls.js uses the browser's MSE (Media Source Extensions) API which cannot decode H.265/HEVC. The stream-copy puts raw H.265 into MPEG-TS segments that FFmpeg accepts but browsers reject. HomeKit continued working because Scrypted transcodes independently.
+
+Attempted fix: VAAPI hardware transcode (H.265 → H.264 via Intel UHD 630). Failed due to render group permissions (`No VA display found for device /dev/dri/renderD128` — fixable with `sudo usermod -aG render chip` + re-login). But even if VAAPI worked, the quality benefit is marginal: we'd be serving transcoded H.264, not H.265, so the quality ceiling is set by the transcode, not the camera codec. The stream-copy H.264 architecture (zero CPU, no failure modes) is superior for this pipeline.
+
+**Decision: keep both cameras on H.264.** The bitrate increase (4096 → 5120 Kb/s) is the correct lever for quality — more bits per frame in H.264 stream-copy, delivered directly to the browser with zero processing.
+
+### I-frame quality pulse — VBR→CBR + longer GOP
+Noticed in daytime: pixels would flash bright/dark at exactly 1-second intervals; not visible in IR/night or in the Home app (Scrypted re-encodes at 1080p, smoothing the artifact). Root cause: VBR encoder allocates a large bit budget to each I-frame (all macroblocks refreshed) and far fewer bits to the 19 trailing P-frames, creating a visible quality pulse in high-detail outdoor scenes. Home app looks better because Scrypted's transcode redistributes bits evenly.
+
+**Fix:** switched camera from VBR → CBR (5120 Kbps) to prevent the encoder from "saving up" bits for keyframes, and increased Frame Interval from 20 → 60 frames (1s → 3s GOP) so the refresh happens every 3 seconds rather than every 1. Backend `hls_time` updated from 1 → 3 to match. Trade-off: latency increases from ~3s to ~6s.
+
+### Recording architecture — camera NAS over FFmpeg segment muxer
+Original plan was to add a recording FFmpeg process per camera writing `.mp4` segments. Revised to camera-side NAS recording (camera pushes to Ubuntu Samba share) because:
+- Recording continues if our backend crashes
+- No additional FFmpeg processes (saves CPU/memory)
+- Our backend becomes read-only for recordings — simpler, nothing to corrupt
+- Camera's recording engine is purpose-built; ours would be redundant
 
 ## Future Features (Deferred)
 - Motion/object detection with timeline markers
 - Discord notifications
 - Snapshot capture
 - External drive support
-- VAAPI H.265 recording toggle (halves storage, ~454 GB for 14 days)
-- One-click launch: `.desktop` launcher or shell script that starts backend + frontend and opens the browser — avoids needing two terminals for day-to-day use (lower priority while active dev is ongoing; terminal output is useful for debugging)
+- One-click launch: `.desktop` launcher or shell script that starts backend + frontend and opens the browser
