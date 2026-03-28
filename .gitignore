@@ -8,6 +8,7 @@ backend/woodshop-security
 backend/*.exe
 
 # Runtime data (recordings, HLS, config — bind-mounted in Docker)
+recordings
 recordings/
 hls/
 config/*.db

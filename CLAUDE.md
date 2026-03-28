@@ -45,10 +45,13 @@ A self-hosted home security camera system for Amcrest PoE cameras. Captures RTSP
 - ONVIF not used — management layer that still uses RTSP underneath; no benefit over direct RTSP
 
 ## Storage Plan
-- **Retention:** 7 days
+- **Retention:** 7 days (currently limited to ~24h during development/testing)
 - **Main stream at 5120 Kbps CBR, stream-copy:** ~2.3 GB/hour per camera
 - **7 days × 2 cameras ≈ 768 GB** ✓ within 875 GB available
-- **Recording method:** Camera-side NAS recording via Samba (see Next Phases)
+- **Recording method:** Camera-side NAS recording via NFS (see Architecture below)
+- **NFS export:** `/nvr` on the Ubuntu server, symlinked as `recordings/` in the project directory
+  - cam1 writes to `/nvr/cam1/`, cam2 writes to `/nvr/cam2/`
+  - `/etc/exports`: `/nvr *(rw,sync,no_subtree_check,no_root_squash,insecure)`
 
 ## Dev Workflow
 ```bash
@@ -94,11 +97,12 @@ cd frontend && npm run dev
   Both from the Amcrest camera's imperfect RTSP timestamps. `-use_wallclock_as_timestamps 1` replaces them with wall-clock time. No effect on playback.
 
 ### 🔜 Next Phases
-1. **Ubuntu as NAS** — install Samba, expose `recordings/` as an SMB share, point both cameras at it via Setup → Storage → Destination → NAS in the Amcrest web UI; verify file format cameras write (expect `.mp4`)
+1. ~~**Ubuntu as NAS**~~ ✅ **Done** — NFS server running, both cameras recording to `/nvr/cam1` and `/nvr/cam2`
 2. **Recording indexer** — backend file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path; expose `GET /api/recordings?cam=cam1&date=2026-03-28`
 3. **Playback UI** — calendar/timeline picker in frontend; native `<video>` element for `.mp4` playback (no HLS needed — browsers seek `.mp4` natively via HTTP range requests)
-4. **Settings wired** — camera config, retention period, storage usage connected to real backend data
-5. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser
+4. **Retention cleanup** — cron or backend job deletes files older than N days from `/nvr`; camera "Disk Full = Overwrite" is a fallback but doesn't enforce time-based retention
+5. **Settings wired** — camera config, retention period, storage usage connected to real backend data
+6. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser
 
 ## Architecture
 
@@ -107,13 +111,13 @@ These are deliberately separate pipelines:
 
 ```
 Camera ──RTSP──► FFmpeg ──► HLS segments ──► browser  (live, ~3s latency)
-Camera ──SMB───► Ubuntu NAS (recordings/)              (recording, camera-managed)
+Camera ──NFS───► Ubuntu /nvr/ (recordings/)            (recording, camera-managed)
                      └──► backend indexes files ──► browser  (playback)
 ```
 
 **Live streaming:** FFmpeg pulls RTSP, muxes to HLS. Browser plays via hls.js. ~3s latency, no recording logic in this path.
 
-**Recording:** Cameras write directly to Ubuntu Samba share using their built-in NAS client. Recording continues even if our backend is down. Our backend is read-only for recordings.
+**Recording:** Cameras write directly to Ubuntu NFS export (`/nvr`) using their built-in NAS client. Recording continues even if our backend is down. Our backend is read-only for recordings.
 
 **Playback:** Backend scans recording files, serves index API + file bytes (HTTP range requests). Frontend uses native `<video>` for `.mp4` — full seek support, no HLS required.
 
@@ -197,12 +201,43 @@ Noticed in daytime: pixels would flash bright/dark at exactly 1-second intervals
 
 **Fix:** switched camera from VBR → CBR (5120 Kbps) to prevent the encoder from "saving up" bits for keyframes, and increased Frame Interval from 20 → 60 frames (1s → 3s GOP) so the refresh happens every 3 seconds rather than every 1. Backend `hls_time` updated from 1 → 3 to match. Trade-off: latency increases from ~3s to ~6s.
 
-### Recording architecture — camera NAS over FFmpeg segment muxer
-Original plan was to add a recording FFmpeg process per camera writing `.mp4` segments. Revised to camera-side NAS recording (camera pushes to Ubuntu Samba share) because:
+### Recording architecture — camera NAS (NFS) over FFmpeg segment muxer
+Original plan was to add a recording FFmpeg process per camera writing `.mp4` segments. Revised to camera-side NAS recording because:
 - Recording continues if our backend crashes
 - No additional FFmpeg processes (saves CPU/memory)
 - Our backend becomes read-only for recordings — simpler, nothing to corrupt
 - Camera's recording engine is purpose-built; ours would be redundant
+
+### NAS = NFS, not SMB
+Amcrest cameras use **NFS** for their NAS recording feature, not SMB/CIFS. The "NFS might have risk" popup in the camera UI is Amcrest's own confirmation of this. Setting up Samba will not work — the cameras will not connect to it.
+
+Working NFS setup:
+- Install `nfs-kernel-server` on Ubuntu
+- Export: `/nvr *(rw,sync,no_subtree_check,no_root_squash,insecure)` in `/etc/exports`
+- Camera NAS tab: Server Address = `11.200.0.110`, Remote Directory = `/nvr/cam1` (or `/nvr/cam2`)
+- The Remote Directory field in the Amcrest UI has a ~32 character limit — keep the path short
+- Pre-create the subdirectories (`/nvr/cam1`, `/nvr/cam2`) with `chmod 777` — cameras may not create them
+
+### Recording file structure (confirmed)
+```
+/nvr/cam1/
+  {serial}/               ← camera serial, e.g. AMC09446207BFEAB3F
+    DVRWorkDirectory      ← camera lock file, ignore
+    2026-03-28/
+      001/                ← channel number
+        dav/              ← always named "dav" regardless of format
+          13/             ← hour (0-23)
+            13.44.52-13.52.27[R][0@0][0].mp4   ← completed segment
+            13.44.52-13.52.27[R][0@0][0].idx   ← index sidecar
+            13.52.27-13.52.27[R][0@0][0].mp4_  ← currently recording (trailing _)
+```
+
+Key facts:
+- **Format is `.mp4`** — directly browser-playable, no conversion needed
+- **In-progress files have a trailing `_`** — indexer must ignore `*.mp4_` files
+- **`[R]` = Regular** (continuous/general), **`[M]` = Motion detected** — useful for timeline markers
+- **Filename encodes start/end timestamps** — no need to read file metadata for time range
+- Camera schedule has General, Motion, and Alarm recording types all enabled 24/7
 
 ## Future Features (Deferred)
 - Motion/object detection with timeline markers

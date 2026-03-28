@@ -12,7 +12,7 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 - **Fullscreen** — button in top bar; Escape to exit
 - **Settings** — reorder and show/hide camera cards via drag-and-drop; Combined view L/R assignment and balance persistent across sessions
 - **Cross-device access** — accessible from any device on the local network at `http://<server-ip>:8080`; tested on macOS, iOS, and Windows
-- **24/7 recording** *(in progress)* — continuous segmented recordings with configurable rolling retention
+- **24/7 recording** — continuous `.mp4` segments written directly by cameras to a local NFS share; motion-tagged segments (`[M]`) automatically distinguished from continuous (`[R]`); survives backend restarts
 - **DVR timeline** *(in progress)* — scrub back through recordings, jump to any point, return to live
 - **Dark UI** — clean, responsive React interface; works on desktop and mobile
 - **Camera web UI** — gear icon on each card opens the native Amcrest web UI directly
@@ -24,6 +24,7 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 |---|---|
 | Backend | Go + [Fiber](https://github.com/gofiber/fiber) |
 | Video pipeline | FFmpeg (HLS segmenter, stream-copy video, AAC audio transcode) |
+| Recording | Camera-side NFS — cameras write `.mp4` directly to Ubuntu NFS export |
 | Frontend | React + Vite + Tailwind CSS |
 | Metadata | SQLite *(upcoming)* |
 | Deployment | Docker Compose |
@@ -36,6 +37,7 @@ A self-hosted home security NVR (network video recorder) built for Amcrest PoE c
 - `ffmpeg` installed (`sudo apt install ffmpeg`)
 - Go 1.24+ (`sudo apt install golang-go`)
 - Node 18+ / npm
+- `nfs-kernel-server` for camera recording (`sudo apt install nfs-kernel-server`)
 
 ### Development
 
