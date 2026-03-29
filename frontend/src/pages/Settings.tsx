@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react'
-import { Settings as SettingsIcon, Wifi, WifiOff, HardDrive, Clock, GripVertical, Layers } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Settings as SettingsIcon, Wifi, WifiOff, HardDrive, Clock, GripVertical, Layers, AlertTriangle } from 'lucide-react'
 import { CAM_NAMES, getDualSettings, OTHER_CAM } from '../lib/dualSettings'
+import { api } from '../lib/api'
 
 const CAM_IPS: Record<string, string> = {
   cam1: '11.200.0.101',
@@ -102,6 +103,27 @@ export default function Settings() {
   const [enabled, setEnabled] = useState<Record<string, boolean>>(getEnabledState)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const draggingId = useRef<string | null>(null)
+  const [retentionDays, setRetentionDays] = useState(7)
+  const [lastSavedDays, setLastSavedDays] = useState(7)
+
+  useEffect(() => {
+    api.settings.get().then((s) => {
+      setRetentionDays(s.retentionDays)
+      setLastSavedDays(s.retentionDays)
+    }).catch(() => {})
+  }, [])
+
+  function handleRetentionChange(newVal: number) {
+    const prev = retentionDays
+    setRetentionDays(newVal)
+    api.settings.update({ retentionDays: newVal }).then(() => {
+      setLastSavedDays(newVal)
+    }).catch(() => {
+      setRetentionDays(prev)
+    })
+  }
+
+  const showRetentionWarning = retentionDays > 0 && retentionDays < lastSavedDays
 
   function saveRowOrder(next: string[]) {
     setRowOrder(next)
@@ -254,18 +276,24 @@ export default function Settings() {
                 <p className="text-xs text-zinc-500 mt-0.5">Recordings older than this are deleted</p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                defaultValue={7}
-                min={1}
-                max={60}
-                className="w-14 px-2 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 text-center focus:outline-none focus:border-sky-500"
-              />
-              <span className="text-sm text-zinc-400">days</span>
-            </div>
+            <select
+              value={retentionDays}
+              onChange={(e) => handleRetentionChange(Number(e.target.value))}
+              className="px-2 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-sky-500"
+            >
+              <option value={0}>Off</option>
+              {Array.from({ length: 14 }, (_, i) => i + 1).map((d) => (
+                <option key={d} value={d}>{d} {d === 1 ? 'day' : 'days'}</option>
+              ))}
+            </select>
           </div>
         </div>
+        {showRetentionWarning && (
+          <p className="mt-2 text-[11px] text-amber-500 pl-1 flex items-center gap-1.5">
+            <AlertTriangle size={11} />
+            Recordings older than {retentionDays} {retentionDays === 1 ? 'day' : 'days'} will be deleted on the next cleanup run.
+          </p>
+        )}
       </section>
 
       {/* Storage */}

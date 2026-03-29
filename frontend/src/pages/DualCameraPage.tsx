@@ -66,6 +66,10 @@ export default function DualCameraPage() {
   const leftChGainRef = useRef<GainNode | null>(null)
   const rightChGainRef = useRef<GainNode | null>(null)
   const audioConnected = useRef(false)
+  // Safari (desktop + iOS) doesn't route hls.js/MSE audio through Web Audio API —
+  // createMediaElementSource() doesn't capture the audio on WebKit regardless of HLS path.
+  // Use video.volume for balance instead of gain nodes.
+  const isSafari = useRef(/^((?!chrome|android).)*safari/i.test(navigator.userAgent))
 
   // Settings read once at mount — determines which cam loads into top vs bottom.
   const settings = useRef(getDualSettings())
@@ -108,7 +112,7 @@ export default function DualCameraPage() {
       setStatus('loading')
       video.muted = true
 
-      if (Hls.isSupported()) {
+      if (!isSafari.current && Hls.isSupported()) {
         const hls = new Hls({ liveSyncDurationCount: 1, liveMaxLatencyDurationCount: 4, maxBufferLength: 6, backBufferLength: 0 })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           video.play().then(() => setStatus('playing')).catch(() => setStatus('playing'))
@@ -118,14 +122,20 @@ export default function DualCameraPage() {
         hls.attachMedia(video)
         destroyers.push(() => hls.destroy())
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS path (always used on Safari — createMediaElementSource only
+        // captures audio from native HLS, not from MSE/hls.js, on WebKit).
         video.src = src
         const onMeta = () => video.play().then(() => setStatus('playing')).catch(() => setStatus('playing'))
         const onErr = () => setStatus('error')
+        // Stall recovery: reload the live stream if the browser stalls fetching segments.
+        const onStalled = () => { video.load(); video.play().catch(() => {}) }
         video.addEventListener('loadedmetadata', onMeta)
         video.addEventListener('error', onErr)
+        video.addEventListener('stalled', onStalled)
         destroyers.push(() => {
           video.removeEventListener('loadedmetadata', onMeta)
           video.removeEventListener('error', onErr)
+          video.removeEventListener('stalled', onStalled)
           video.src = ''
         })
       } else {

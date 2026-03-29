@@ -64,7 +64,7 @@ cd frontend && npm run dev
 # Open: http://localhost:5173
 ```
 
-## Current Status (as of 2026-03-28)
+## Current Status (as of 2026-03-29)
 
 ### ✅ Working
 - Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480)
@@ -86,9 +86,12 @@ cd frontend && npm run dev
   - Combined row shows current L/R assignment, Layers icon, Active/Hidden status
   - All enabled states persisted to `nvr_enabled` in localStorage
   - Dashboard reads both keys on mount to render cards in correct order with correct visibility
+- **Retention cleanup** — backend goroutine sweeps `/nvr` hourly, deletes date dirs older than configured window; `0` = disabled (keep forever); persisted to `./config/settings.json`; wired to Settings page dropdown (0–14 days); warns in UI when reducing retention
+- **NTP** — `chrony` installed and syncing (stratum 3); configured to serve LAN at `11.200.0.110:123`; `local stratum 10` fallback keeps cameras synced when internet is unavailable; both cameras confirmed querying the local server
 
 ### ⚠️ Known Issues
 - **Combined audio crackle** — intermittent pops/crackle audible when routing both main streams through the Web Audio API (`createMediaElementSource`). The native browser player masks HLS segment-boundary discontinuities; Web Audio API exposes them. The camera's jittery RTSP timestamps are the root cause. `aresample=async=1000` on the FFmpeg side and `latencyHint: 'playback'` on the AudioContext mitigate it but don't eliminate it. Fundamental limitation of Web Audio + HLS; moving to 3-second segments may reduce frequency of crackle vs. 1-second segments.
+- **Safari: stereo balance/pan not functional** — `createMediaElementSource()` does not capture audio from `<video>` elements on WebKit (tested macOS Safari), even when using native HLS (forced on Safari to avoid the MSE/hls.js + Web Audio bug). The gain nodes and StereoPannerNode exist in the graph but receive no signal. Audio plays, mute/unmute works, but the balance slider has no effect. Chrome/Brave/Firefox work correctly. Root cause is a WebKit limitation; no clean workaround found yet.
 - **FFmpeg warnings (non-fatal):**
   ```
   [hls] Timestamps are unset in a packet for stream 0
@@ -98,11 +101,12 @@ cd frontend && npm run dev
 
 ### 🔜 Next Phases
 1. ~~**Ubuntu as NAS**~~ ✅ **Done** — NFS server running, both cameras recording to `/nvr/cam1` and `/nvr/cam2`
-2. **Recording indexer** — backend file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path; expose `GET /api/recordings?cam=cam1&date=2026-03-28`
-3. **Playback UI** — calendar/timeline picker in frontend; native `<video>` element for `.mp4` playback (no HLS needed — browsers seek `.mp4` natively via HTTP range requests)
-4. **Retention cleanup** — cron or backend job deletes files older than N days from `/nvr`; camera "Disk Full = Overwrite" is a fallback but doesn't enforce time-based retention
-5. **Settings wired** — camera config, retention period, storage usage connected to real backend data
-6. **One-click launch** — `.desktop` file or wrapper script that starts backend + frontend and opens the browser
+2. ~~**Retention cleanup**~~ ✅ **Done** — hourly backend sweep, UI dropdown, persisted to `config/settings.json`
+3. ~~**NTP**~~ ✅ **Done** — chrony serving LAN at `11.200.0.110`, offline fallback via `local stratum 10`
+4. **Recording indexer** — backend file watcher populates SQLite, maps `(cam, start_time, end_time)` → file path; expose `GET /api/recordings?cam=cam1&date=2026-03-28`
+5. **Playback UI** — calendar/timeline picker in frontend; native `<video>` element for `.mp4` playback (no HLS needed — browsers seek `.mp4` natively via HTTP range requests)
+6. **Settings wired** — storage usage on Settings page connected to real backend data (`du` on `/nvr`)
+7. **One-click launch** — systemd unit that starts Docker Compose with `After=nfs-server.service` ordering
 
 ## Architecture
 
@@ -155,11 +159,16 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 ### Backend (Go / Fiber)
 - `backend/main.go` — entry point, Fiber routes, FFmpeg manager startup; `STATIC_DIR` defaults to `../frontend/dist` so `go run .` serves the built SPA directly
 - `backend/internal/ffmpeg/manager.go` — FFmpeg subprocess lifecycle (start, monitor, restart with exponential backoff)
+- `backend/internal/settings/settings.go` — thread-safe JSON settings store; atomic write via temp file + rename; defaults to 7-day retention if no file exists
+- `backend/internal/retention/cleaner.go` — hourly goroutine; walks `/nvr/cam*/serial/YYYY-MM-DD/` dirs, deletes any dated dir older than `retentionDays`; skips non-date dirs (e.g. `DVRWorkDirectory`); `retentionDays=0` disables cleanup entirely
 - `GET /api/cameras` — camera list
 - `GET /api/health` — health check
+- `GET /api/settings` — returns `{retentionDays}`
+- `PUT /api/settings` — updates settings, persists to `config/settings.json` (gitignored, stays local)
 - `GET /hls/:cam/:stream/live.m3u8` — no-cache playlist handler
 - `GET /hls/**` — static segment handler (cached)
 - React SPA static files in production
+- Env vars: `PORT` (8080), `STATIC_DIR`, `HLS_DIR` (./hls), `NVR_DIR` (/nvr), `CONFIG_DIR` (./config)
 
 ### Frontend (React + Vite + Tailwind)
 - `src/lib/api.ts` — fetch wrappers, `hlsUrl()` helper
@@ -172,8 +181,8 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 - `src/components/Layout.tsx` — top nav
 - `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
 - `src/pages/CameraPage.tsx` — full camera view, main stream, mute/fullscreen, zoom/pan, DVR timeline placeholder
-- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped; mute also sets `video.muted` directly because Safari's `createMediaElementSource()` doesn't fully disconnect native audio output
-- `src/pages/Settings.tsx` — camera/combined rows with drag-to-reorder (GripVertical, HTML5 DnD) and functional show/hide toggles; saves to `nvr_card_order` and `nvr_enabled`
+- `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped; mute also sets `video.muted` directly because Safari's `createMediaElementSource()` doesn't fully disconnect native audio output; Safari detected via UA and forced onto native HLS path (skips hls.js) because MSE/hls.js + `createMediaElementSource` doesn't capture audio on WebKit; stall recovery (`video.load()`) on native HLS path
+- `src/pages/Settings.tsx` — camera/combined rows with drag-to-reorder (GripVertical, HTML5 DnD) and functional show/hide toggles; saves to `nvr_card_order` and `nvr_enabled`; retention dropdown (0 = Off, 1–14 days) fetched from and saved to `GET/PUT /api/settings`; warns when reducing retention
 
 ### localStorage Keys
 | Key | Type | Description |
@@ -186,6 +195,8 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 ### Deployment
 - Docker Compose: single `app` service, Go binary + static React build
 - Bind mounts: `/nvr:/recordings`, `./hls`, `./config`, `./frontend/dist`
+- **systemd unit (when setting up one-click launch):** must include `After=nfs-server.service Requires=nfs-server.service` so Docker Compose doesn't start before the NFS export is ready
+- `nfs-kernel-server` is enabled on boot (confirmed via systemctl); no extra setup needed for reboots
 
 ## Decisions & Lessons Learned
 
@@ -238,6 +249,18 @@ Key facts:
 - **`[R]` = Regular** (continuous/general), **`[M]` = Motion detected** — useful for timeline markers
 - **Filename encodes start/end timestamps** — no need to read file metadata for time range
 - Camera schedule has General, Motion, and Alarm recording types all enabled 24/7
+
+### NTP — local time server for cameras
+Cameras need accurate time for recording filenames and timestamp overlays. The Ubuntu server runs `chrony` (already installed on Ubuntu 25.10) and is configured to serve NTP on the LAN.
+
+Config added at `/etc/chrony/conf.d/lan-server.conf`:
+```
+allow 11.200.0.0/24
+local stratum 10
+```
+`local stratum 10` is the key for offline use — without it, chrony stops answering clients when it has no upstream internet sync. With it, the local hardware clock becomes the fallback source.
+
+Camera NTP settings: Server = `11.200.0.110`, Port = `123`. Both cameras confirmed querying the local server (`sudo chronyc clients`).
 
 ## Future Features (Deferred)
 - Motion/object detection with timeline markers

@@ -14,6 +14,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 
 	"woodshop-security/internal/ffmpeg"
+	"woodshop-security/internal/retention"
+	"woodshop-security/internal/settings"
 )
 
 type Camera struct {
@@ -40,6 +42,13 @@ func main() {
 	port := getEnv("PORT", "8080")
 	staticDir := getEnv("STATIC_DIR", "../frontend/dist")
 	hlsDir := getEnv("HLS_DIR", "./hls")
+	nvrDir := getEnv("NVR_DIR", "/nvr")
+	configDir := getEnv("CONFIG_DIR", "./config")
+
+	store, err := settings.Load(filepath.Join(configDir, "settings.json"))
+	if err != nil {
+		log.Fatalf("failed to load settings: %v", err)
+	}
 
 	// Build FFmpeg stream list — sub (thumb) + main per camera
 	var streams []ffmpeg.Stream
@@ -66,6 +75,9 @@ func main() {
 	mgr := ffmpeg.New(streams)
 	mgr.Start(ctx)
 
+	cleaner := retention.New(nvrDir, func() int { return store.Get().RetentionDays })
+	cleaner.Start(ctx)
+
 	app := fiber.New(fiber.Config{
 		AppName:               "Woodshop Security",
 		DisableStartupMessage: false,
@@ -84,6 +96,24 @@ func main() {
 	})
 	api.Get("/cameras", func(c *fiber.Ctx) error {
 		return c.JSON(cameras)
+	})
+
+	api.Get("/settings", func(c *fiber.Ctx) error {
+		return c.JSON(store.Get())
+	})
+
+	api.Put("/settings", func(c *fiber.Ctx) error {
+		var next settings.Settings
+		if err := c.BodyParser(&next); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		if next.RetentionDays < 0 || next.RetentionDays > 365 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "retentionDays must be 0–365"})
+		}
+		if err := store.Set(next); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(store.Get())
 	})
 
 	// HLS playlists: no-cache so hls.js always sees the latest segment list.
