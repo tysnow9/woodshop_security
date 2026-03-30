@@ -220,6 +220,9 @@ func (ix *Indexer) enqueue(ctx context.Context, item workItem) {
 	select {
 	case ix.workCh <- item:
 	case <-ctx.Done():
+	default:
+		// Channel full — scan goroutine must not block or it can't reach later cameras.
+		// The next 60s scan cycle will re-enqueue unprocessed files.
 	}
 }
 

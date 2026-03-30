@@ -69,6 +69,18 @@ export default function CameraPage() {
 
   // ── Recordings effects ────────────────────────────────────────────────────
 
+  // On camera load, default to the most recent date that has recordings if
+  // today has none yet (e.g. backend just started and hasn't indexed today's files).
+  useEffect(() => {
+    if (!camera) return
+    const today = new Date().toISOString().slice(0, 10)
+    api.recordings.listDates(camera.id).then(r => {
+      if (r.dates.length > 0 && !r.dates.includes(today)) {
+        setSelectedDate(r.dates[0])
+      }
+    }).catch(() => {})
+  }, [camera])
+
   // Reset to live when date changes
   useEffect(() => {
     setMode('live')
