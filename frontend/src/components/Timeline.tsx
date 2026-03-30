@@ -89,10 +89,16 @@ export default function Timeline({
   const viewCenterMsRef    = useRef<number>(Date.now())
   const pixelsPerSecRef    = useRef<number>(0)
   const userInteractingRef = useRef(false)
+  // True when the user has manually panned away from the live edge.
+  // Prevents the live tick from snapping the view back while they explore.
+  // Cleared when entering live mode (Go Live).
+  const userHasPannedRef   = useRef(false)
   const lastPointerXRef    = useRef<number | null>(null)
   const rafRef             = useRef<number | null>(null)
   const interactTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const liveTickRef        = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Tracks previous interacting state so onScrubChange only fires on transitions.
+  const wasInteractingRef  = useRef(false)
 
   // State — synced from refs via RAF flush
   const [viewCenterMs, setViewCenterMs] = useState<number>(Date.now())
@@ -133,7 +139,12 @@ export default function Timeline({
       setViewCenterMs(centerMs)
       setPixelsPerSec(pixelsPerSecRef.current)
       setInteracting(isInteracting)
-      onScrubChangeRef.current(isInteracting, scrubSeg, scrubFrame)
+
+      // Only notify parent when scrub state actually changes, not on every live tick.
+      if (isInteracting !== wasInteractingRef.current || isInteracting) {
+        wasInteractingRef.current = isInteracting
+        onScrubChangeRef.current(isInteracting, scrubSeg, scrubFrame)
+      }
     })
   }
 
@@ -143,6 +154,7 @@ export default function Timeline({
     const bar = barRef.current
     if (!bar || pixelsPerSecRef.current !== 0) return
     const barWidth = bar.getBoundingClientRect().width
+    if (barWidth === 0) return
     const TWO_HOURS_SEC = 2 * 3600
     const pps = barWidth / TWO_HOURS_SEC
     pixelsPerSecRef.current = pps
@@ -164,8 +176,20 @@ export default function Timeline({
       if (liveTickRef.current) clearInterval(liveTickRef.current)
       return
     }
+
+    // Entering live mode: clear the panned flag and snap view to live edge.
+    userHasPannedRef.current = false
+    const bar = barRef.current
+    if (bar && pixelsPerSecRef.current > 0) {
+      const barWidth = bar.getBoundingClientRect().width
+      const halfWindowMs = (barWidth / 2 / pixelsPerSecRef.current) * 1000
+      viewCenterMsRef.current = Date.now() - halfWindowMs
+      scheduleFlush()
+    }
+
     liveTickRef.current = setInterval(() => {
-      if (userInteractingRef.current) return
+      // Don't override user's manually scrolled position.
+      if (userInteractingRef.current || userHasPannedRef.current) return
       const bar = barRef.current
       if (!bar || pixelsPerSecRef.current === 0) return
       const barWidth = bar.getBoundingClientRect().width
@@ -193,6 +217,7 @@ export default function Timeline({
     function onWheel(e: WheelEvent) {
       e.preventDefault()
       userInteractingRef.current = true
+      userHasPannedRef.current = true  // user has manually navigated away from live edge
       if (interactTimerRef.current) clearTimeout(interactTimerRef.current)
 
       const rect     = bar!.getBoundingClientRect()
@@ -253,7 +278,9 @@ export default function Timeline({
     const bar = barRef.current
     if (!bar) return
     const dx = e.clientX - lastPointerXRef.current
+    if (dx === 0) return
     lastPointerXRef.current = e.clientX
+    userHasPannedRef.current = true  // actual drag movement — mark as manually panned
     const deltaSec = dx / pixelsPerSecRef.current
     viewCenterMsRef.current = clampCenter(
       viewCenterMsRef.current - deltaSec * 1000,
@@ -309,20 +336,22 @@ export default function Timeline({
                 className={`absolute top-0 h-full ${seg.motion ? 'bg-amber-600/70' : 'bg-sky-700/60'}`}
                 style={{
                   left:  Math.max(0, x1),
-                  width: Math.min(barWidth, x2) - Math.max(0, x1),
+                  width: Math.max(2, Math.min(barWidth, x2) - Math.max(0, x1)), // min 2px so tiny segments are visible
                 }}
               />
             )
           })}
 
-          {/* Center needle — playback mode only */}
+          {/* Center needle — always visible; white in playback, faint in live */}
+          <div
+            className={`absolute top-0 h-full w-px pointer-events-none z-20 transition-colors ${
+              isLive ? 'bg-white/20' : 'bg-white/90'
+            }`}
+            style={{ left: '50%' }}
+          />
           {!isLive && (
-            <>
-              <div className="absolute top-0 h-full w-px bg-white/90 pointer-events-none z-20"
-                   style={{ left: '50%' }} />
-              <div className="absolute w-2 h-2 bg-white rounded-full pointer-events-none z-20"
-                   style={{ left: 'calc(50% - 4px)', top: -4 }} />
-            </>
+            <div className="absolute w-2 h-2 bg-white rounded-full pointer-events-none z-20"
+                 style={{ left: 'calc(50% - 4px)', top: -4 }} />
           )}
 
           {/* Live edge indicator */}
@@ -338,7 +367,7 @@ export default function Timeline({
             )
           })()}
 
-          {/* Scrub time label above needle */}
+          {/* Scrub time label above center needle */}
           {interacting && (
             <div className="absolute bottom-full mb-2 z-50 pointer-events-none"
                  style={{ left: '50%', transform: 'translateX(-50%)' }}>

@@ -238,12 +238,28 @@ export default function CameraPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   function handleSeek(time: Date) {
-    const seg = segments.find(s =>
-      new Date(s.startTime).getTime() <= time.getTime() &&
-      new Date(s.endTime).getTime()   >= time.getTime()
+    if (segments.length === 0) return
+    const tMs = time.getTime()
+
+    // Try exact match first (needle is inside a recorded segment).
+    let seg = segments.find(s =>
+      new Date(s.startTime).getTime() <= tMs &&
+      new Date(s.endTime).getTime()   >= tMs
     )
-    if (!seg) return
-    const offset = (time.getTime() - new Date(seg.startTime).getTime()) / 1000
+
+    // Fall back to the segment whose start time is nearest to the seek point.
+    // This means any click/drag on the timeline initiates playback — the user
+    // doesn't have to center the needle precisely on a thin segment block.
+    if (!seg) {
+      seg = segments.reduce((best, s) => {
+        const d    = Math.abs(new Date(s.startTime).getTime() - tMs)
+        const dBest = Math.abs(new Date(best.startTime).getTime() - tMs)
+        return d < dBest ? s : best
+      })
+    }
+
+    const segStartMs = new Date(seg.startTime).getTime()
+    const offset = Math.max(0, Math.min((tMs - segStartMs) / 1000, seg.durationSec))
     setCurrentSegment(seg)
     setSeekOffset(offset)
     setMode('playback')
