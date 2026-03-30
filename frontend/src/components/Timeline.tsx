@@ -28,9 +28,16 @@ function clampPixelsPerSec(pps: number, barWidth: number): number {
   return Math.max(minPps, Math.min(maxPps, pps))
 }
 
+function localDayBounds(date: string): { dayStart: number; dayEnd: number } {
+  const [y, m, d] = date.split('-').map(Number)
+  return {
+    dayStart: new Date(y, m - 1, d).getTime(),       // local midnight
+    dayEnd:   new Date(y, m - 1, d + 1).getTime(),   // local next midnight
+  }
+}
+
 function clampCenter(centerMs: number, date: string): number {
-  const dayStart = new Date(date + 'T00:00:00Z').getTime()
-  const dayEnd   = new Date(date + 'T24:00:00Z').getTime()
+  const { dayStart, dayEnd } = localDayBounds(date)
   return Math.max(dayStart, Math.min(dayEnd, centerMs))
 }
 
@@ -58,16 +65,15 @@ function getVisibleLabels(
   if (pixelsPerSec === 0) return []
   const intervalSec = getLabelIntervalSec(pixelsPerSec)
   const intervalMs = intervalSec * 1000
-  const dayStart = new Date(date + 'T00:00:00Z').getTime()
-  const dayEnd   = new Date(date + 'T24:00:00Z').getTime()
+  const { dayStart, dayEnd } = localDayBounds(date)
   const firstMs  = Math.ceil(dayStart / intervalMs) * intervalMs
   const result = []
   for (let ms = firstMs; ms <= dayEnd; ms += intervalMs) {
     const x = timeToX(ms, barWidth, centerMs, pixelsPerSec)
     if (x < -40 || x > barWidth + 40) continue
-    const d = new Date(ms)
-    const h = d.getUTCHours().toString().padStart(2, '0')
-    const m = d.getUTCMinutes().toString().padStart(2, '0')
+    const dt = new Date(ms)
+    const h = dt.getHours().toString().padStart(2, '0')
+    const m = dt.getMinutes().toString().padStart(2, '0')
     result.push({ ms, x, label: m === '00' ? h + ':00' : h + ':' + m })
   }
   return result
@@ -155,8 +161,9 @@ export default function Timeline({
     if (!bar || pixelsPerSecRef.current !== 0) return
     const barWidth = bar.getBoundingClientRect().width
     if (barWidth === 0) return
-    const TWO_HOURS_SEC = 2 * 3600
-    const pps = barWidth / TWO_HOURS_SEC
+    // Default zoom: 6 hours visible so segments aren't microscopic.
+    const SIX_HOURS_SEC = 6 * 3600
+    const pps = barWidth / SIX_HOURS_SEC
     pixelsPerSecRef.current = pps
 
     if (isLive) {

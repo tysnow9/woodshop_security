@@ -3,8 +3,14 @@ package index
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 )
+
+func atoi2(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
 
 type segmentInfo struct {
 	StartTime time.Time
@@ -25,31 +31,24 @@ func parseSegmentFilename(date, filename string) (segmentInfo, error) {
 		return segmentInfo{}, fmt.Errorf("filename does not match segment pattern: %s", filename)
 	}
 
-	base, err := time.Parse("2006-01-02", date)
+	// Parse the date in the server's local timezone. Camera filenames use the
+	// local clock (cameras are NTP-synced to this server), so treating them as
+	// UTC would shift every timestamp by the UTC offset (e.g. 7 h for PDT).
+	base, err := time.ParseInLocation("2006-01-02", date, time.Local)
 	if err != nil {
 		return segmentInfo{}, fmt.Errorf("invalid date %q: %w", date, err)
 	}
 
-	startTime, err := time.Parse("2006-01-02 15:04:05",
-		fmt.Sprintf("%s %s:%s:%s", date, m[1], m[2], m[3]))
-	if err != nil {
-		return segmentInfo{}, fmt.Errorf("parse start time: %w", err)
-	}
-	startTime = time.Date(
+	startTime := time.Date(
 		base.Year(), base.Month(), base.Day(),
-		startTime.Hour(), startTime.Minute(), startTime.Second(),
-		0, time.UTC,
+		atoi2(m[1]), atoi2(m[2]), atoi2(m[3]),
+		0, time.Local,
 	)
 
-	endTime, err := time.Parse("2006-01-02 15:04:05",
-		fmt.Sprintf("%s %s:%s:%s", date, m[4], m[5], m[6]))
-	if err != nil {
-		return segmentInfo{}, fmt.Errorf("parse end time: %w", err)
-	}
-	endTime = time.Date(
+	endTime := time.Date(
 		base.Year(), base.Month(), base.Day(),
-		endTime.Hour(), endTime.Minute(), endTime.Second(),
-		0, time.UTC,
+		atoi2(m[4]), atoi2(m[5]), atoi2(m[6]),
+		0, time.Local,
 	)
 
 	if endTime.Before(startTime) {

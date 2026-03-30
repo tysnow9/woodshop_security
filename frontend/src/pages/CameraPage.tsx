@@ -8,6 +8,10 @@ import Timeline from '../components/Timeline'
 
 type Mode = 'live' | 'playback'
 
+function localDateStr(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export default function CameraPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
@@ -22,7 +26,8 @@ export default function CameraPage() {
 
   // Playback state
   const [mode, setMode]                   = useState<Mode>('live')
-  const [selectedDate, setSelectedDate]   = useState<string>(() => new Date().toISOString().slice(0, 10))
+  const [selectedDate, setSelectedDate]   = useState<string>(() => localDateStr())
+  const [playbackReady, setPlaybackReady] = useState(false)
   const [segments, setSegments]           = useState<RecordingSegment[]>([])
   const [currentSegment, setCurrentSegment] = useState<RecordingSegment | null>(null)
   const [seekOffset, setSeekOffset]       = useState(0)
@@ -73,7 +78,7 @@ export default function CameraPage() {
   // today has none yet (e.g. backend just started and hasn't indexed today's files).
   useEffect(() => {
     if (!camera) return
-    const today = new Date().toISOString().slice(0, 10)
+    const today = localDateStr()
     api.recordings.listDates(camera.id).then(r => {
       if (r.dates.length > 0 && !r.dates.includes(today)) {
         setSelectedDate(r.dates[0])
@@ -100,7 +105,7 @@ export default function CameraPage() {
   // Poll for new segments every 60s when viewing today
   useEffect(() => {
     if (!camera) return
-    const today = new Date().toISOString().slice(0, 10)
+    const today = localDateStr()
     if (selectedDate !== today) return
     const interval = setInterval(() => {
       api.recordings.listByDate(camera.id, selectedDate)
@@ -110,16 +115,29 @@ export default function CameraPage() {
     return () => clearInterval(interval)
   }, [camera, selectedDate])
 
+  // Mute/unmute the HLS live player based on mode.
+  // The live player runs hidden (opacity-0) during playback — we must silence it
+  // explicitly since opacity doesn't affect audio.
+  useEffect(() => {
+    if (mode === 'playback') {
+      playerRef.current?.setMuted(true)
+    } else {
+      playerRef.current?.setMuted(muted)
+    }
+  }, [mode])
+
   // Load playback video when segment/offset changes
   useEffect(() => {
     if (mode !== 'playback' || !currentSegment || !playbackVideoRef.current) return
     const video = playbackVideoRef.current
     const targetOffset = seekOffset
+    setPlaybackReady(false)
 
     function onCanPlay() {
       video.currentTime = targetOffset
       video.playbackRate = playbackRate
       video.play().catch(() => {})
+      setPlaybackReady(true)
       video.removeEventListener('canplay', onCanPlay)
     }
 
@@ -272,6 +290,7 @@ export default function CameraPage() {
     setCurrentSegment(null)
     setPlaybackTime(null)
     setPlaybackRate(1)
+    setPlaybackReady(false)
     preloadRef.current = null
   }
 
@@ -322,7 +341,7 @@ export default function CameraPage() {
           <input
             type="date"
             value={selectedDate}
-            max={new Date().toISOString().slice(0, 10)}
+            max={localDateStr()}
             onChange={e => setSelectedDate(e.target.value)}
             className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-200 px-2 py-1 focus:outline-none focus:border-sky-500"
           />
@@ -375,8 +394,12 @@ export default function CameraPage() {
 
         {/* Layered video area */}
         <div className="relative flex-1 min-h-0 bg-black">
-          {/* Live HLS stream */}
-          <div className={`absolute inset-0 ${mode === 'live' ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+          {/* Live HLS stream — stays visible until playback video is ready to
+              avoid a black flash on transition. Hidden (but still running) during
+              playback so we can switch back to live instantly. */}
+          <div className={`absolute inset-0 transition-opacity duration-200 ${
+            mode === 'live' || !playbackReady ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}>
             <HlsPlayer
               ref={playerRef}
               src={hlsUrl(camera.id, 'main')}
@@ -387,13 +410,14 @@ export default function CameraPage() {
             />
           </div>
 
-          {/* Playback video — opacity:0 while scrubbing keeps last frame visible */}
+          {/* Playback video — fades in once canplay fires (playbackReady).
+              opacity:0 while scrubbing keeps last decoded frame visible. */}
           <video
             ref={playbackVideoRef}
             playsInline
             muted={muted}
-            className="absolute inset-0 w-full h-full object-contain"
-            style={{ opacity: mode === 'playback' && !scrubbing ? 1 : 0 }}
+            className="absolute inset-0 w-full h-full object-contain transition-opacity duration-200"
+            style={{ opacity: mode === 'playback' && playbackReady && !scrubbing ? 1 : 0 }}
           />
 
           {/* Sprite thumbnail overlay — shown while scrubbing */}
