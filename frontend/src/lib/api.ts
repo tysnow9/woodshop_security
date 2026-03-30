@@ -1,4 +1,4 @@
-import type { Camera } from './types'
+import type { Camera, RecordingDatesResponse, RecordingsResponse } from './types'
 
 const BASE = '/api'
 
@@ -27,6 +27,12 @@ export const api = {
   settings: {
     get: () => get<AppSettings>('/settings'),
     update: (s: AppSettings) => put<AppSettings>('/settings', s),
+  },
+  recordings: {
+    listDates: (cam: string) =>
+      get<RecordingDatesResponse>(`/recordings/dates?cam=${encodeURIComponent(cam)}`),
+    listByDate: (cam: string, date: string) =>
+      get<RecordingsResponse>(`/recordings?cam=${encodeURIComponent(cam)}&date=${encodeURIComponent(date)}`),
   },
 }
 
