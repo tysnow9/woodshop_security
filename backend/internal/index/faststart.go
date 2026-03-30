@@ -22,6 +22,7 @@ func runFaststart(ctx context.Context, src string) error {
 		"-i", src,
 		"-movflags", "+faststart",
 		"-c", "copy",
+		"-f", "mp4",
 		tmp,
 	)
 	cmd.Stderr = &stderr
