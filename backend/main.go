@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 
 	"woodshop-security/internal/ffmpeg"
+	"woodshop-security/internal/index"
 	"woodshop-security/internal/retention"
 	"woodshop-security/internal/settings"
 )
@@ -78,6 +81,17 @@ func main() {
 	cleaner := retention.New(nvrDir, func() int { return store.Get().RetentionDays })
 	cleaner.Start(ctx)
 
+	dbPath := filepath.Join(configDir, "recordings.db")
+	recDB, err := index.OpenDB(dbPath)
+	if err != nil {
+		log.Fatalf("failed to open recordings DB: %v", err)
+	}
+
+	indexer := index.NewIndexer(nvrDir, recDB, func() int {
+		return store.Get().RetentionDays
+	})
+	indexer.Start(ctx)
+
 	app := fiber.New(fiber.Config{
 		AppName:               "Woodshop Security",
 		DisableStartupMessage: false,
@@ -102,6 +116,71 @@ func main() {
 		return c.JSON(store.Get())
 	})
 
+	// Known camera IDs for validation.
+	knownCams := make(map[string]bool)
+	for _, cam := range cameras {
+		knownCams[cam.ID] = true
+	}
+	var dateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+	// GET /api/recordings/dates?cam=cam1
+	api.Get("/recordings/dates", func(c *fiber.Ctx) error {
+		cam := c.Query("cam")
+		if !knownCams[cam] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unknown cam"})
+		}
+		dates, err := recDB.ListDates(cam)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		if dates == nil {
+			dates = []string{}
+		}
+		return c.JSON(fiber.Map{"cam": cam, "dates": dates})
+	})
+
+	// GET /api/recordings?cam=cam1&date=2026-03-28
+	api.Get("/recordings", func(c *fiber.Ctx) error {
+		cam := c.Query("cam")
+		date := c.Query("date")
+		if !knownCams[cam] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unknown cam"})
+		}
+		if !dateRE.MatchString(date) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid date"})
+		}
+		rows, err := recDB.ListByDate(cam, date)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		type segment struct {
+			ID          int64  `json:"id"`
+			StartTime   string `json:"startTime"`
+			EndTime     string `json:"endTime"`
+			Motion      bool   `json:"motion"`
+			DurationSec int    `json:"durationSec"`
+			HasSprite   bool   `json:"hasSprite"`
+			VideoURL    string `json:"videoUrl"`
+			SpriteURL   string `json:"spriteUrl"`
+		}
+
+		segs := make([]segment, 0, len(rows))
+		for _, r := range rows {
+			segs = append(segs, segment{
+				ID:          r.ID,
+				StartTime:   r.StartTime.UTC().Format("2006-01-02T15:04:05Z"),
+				EndTime:     r.EndTime.UTC().Format("2006-01-02T15:04:05Z"),
+				Motion:      r.Motion,
+				DurationSec: int(r.EndTime.Sub(r.StartTime).Seconds()),
+				HasSprite:   r.SpritePath != "",
+				VideoURL:    "/recordings/" + strconv.FormatInt(r.ID, 10) + "/video",
+				SpriteURL:   "/recordings/" + strconv.FormatInt(r.ID, 10) + "/sprite",
+			})
+		}
+		return c.JSON(fiber.Map{"cam": cam, "date": date, "segments": segs})
+	})
+
 	api.Put("/settings", func(c *fiber.Ctx) error {
 		var next settings.Settings
 		if err := c.BodyParser(&next); err != nil {
@@ -114,6 +193,42 @@ func main() {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(store.Get())
+	})
+
+	// Recording file serving — video and sprite.
+	app.Get("/recordings/:id/video", func(c *fiber.Ctx) error {
+		id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+		}
+		row, err := recDB.GetByID(id)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+		}
+		if _, err := os.Stat(row.FilePath); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "file not found"})
+		}
+		c.Set("Cache-Control", "public, max-age=3600, immutable")
+		return c.SendFile(row.FilePath)
+	})
+
+	app.Get("/recordings/:id/sprite", func(c *fiber.Ctx) error {
+		id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+		}
+		row, err := recDB.GetByID(id)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+		}
+		if row.SpritePath == "" {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "sprite not yet generated"})
+		}
+		if _, err := os.Stat(row.SpritePath); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "sprite file not found"})
+		}
+		c.Set("Cache-Control", "public, max-age=3600, immutable")
+		return c.SendFile(row.SpritePath)
 	})
 
 	// HLS playlists: no-cache so hls.js always sees the latest segment list.

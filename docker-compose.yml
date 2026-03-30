@@ -13,7 +13,7 @@ services:
     restart: unless-stopped
     environment:
       - PORT=8080
-      - RECORDINGS_DIR=/recordings
+      - NVR_DIR=/recordings
       - HLS_DIR=/hls
       - CONFIG_DIR=/config
       - STATIC_DIR=/app/static
