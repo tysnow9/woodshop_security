@@ -114,12 +114,12 @@ func run(ctx context.Context, s Stream) error {
 
 	// Thumb stream transcodes so FFmpeg can insert keyframes freely — 1s segments.
 	// Main stream copies video verbatim — segments can only split at camera keyframes.
-	// Camera Frame Interval is 60 frames (3s at 20fps), so hls_time must be 3.
+	// Camera Frame Interval is 40 frames (2s at 20fps), so hls_time must be 2.
 	hlsTime := "1"
 	hlsListSize := "8"
 	if !s.Transcode {
-		hlsTime = "3"
-		hlsListSize = "5"
+		hlsTime = "2"
+		hlsListSize = "7"
 	}
 
 	args = append(args,

@@ -31,9 +31,9 @@ graph TB
 
         subgraph FFmpegProcs["FFmpeg Subprocesses"]
             F1T["cam1-thumb\nRTSP sub → HLS\nlibx264 ultrafast\n1s segments, 8-seg window"]
-            F1M["cam1-main\nRTSP main → HLS\nvideo stream-copy\naudio → 48kHz AAC\n3s segments, 5-seg window"]
+            F1M["cam1-main\nRTSP main → HLS\nvideo stream-copy\naudio → 48kHz AAC\n2s segments, 7-seg window"]
             F2T["cam2-thumb\nRTSP sub → HLS\nlibx264 ultrafast\n1s segments, 8-seg window"]
-            F2M["cam2-main\nRTSP main → HLS\nvideo stream-copy\naudio → 48kHz AAC\n3s segments, 5-seg window"]
+            F2M["cam2-main\nRTSP main → HLS\nvideo stream-copy\naudio → 48kHz AAC\n2s segments, 7-seg window"]
         end
 
         subgraph HLSFiles["HLS Output (./hls/)"]
@@ -135,13 +135,13 @@ Camera RTSP ──UDP──► FFmpeg subprocess ──► .ts segments on disk 
 | Process | Input | Video | Audio | Segments |
 |---------|-------|-------|-------|----------|
 | `{cam}-thumb` | subtype=1 (704×480) | libx264 ultrafast | AAC 22050Hz | 1s, 8-seg window |
-| `{cam}-main` | subtype=0 (2960×1668) | stream copy (zero CPU) | AAC 48kHz 128kbps | 3s, 5-seg window |
+| `{cam}-main` | subtype=0 (2960×1668) | stream copy (zero CPU) | AAC 48kHz 128kbps | 2s, 7-seg window |
 
 **Why stream-copy for main:** No CPU or quality cost. The camera's H.264 CBR stream is delivered directly into MPEG-TS segments. Audio must be transcoded because the camera's RTSP stream carries AAC without valid ADTS framing headers.
 
-**Why 3s segments for main:** Camera GOP (Frame Interval 60 = 3s at 20fps) — FFmpeg can only split at keyframe boundaries when stream-copying. `hls_time 3` matches the GOP exactly.
+**Why 2s segments for main:** Camera GOP (Frame Interval 40 = 2s at 20fps) — FFmpeg can only split at keyframe boundaries when stream-copying. `hls_time 2` matches the GOP exactly.
 
-**HLS latency:** 3s segment + `liveSyncDurationCount: 1` in hls.js → ~6s behind live edge.
+**HLS latency:** 2s segment + `liveSyncDurationCount: 2` in hls.js → ~6s behind live edge. `liveSyncDurationCount: 2` keeps two segments buffered, preventing the stall that occurred at the first segment boundary with count=1.
 
 **Playlist caching:** `live.m3u8` served with `Cache-Control: no-cache, no-store` (bypasses Fiber's 10s static cache). `.ts` segments use `max-age=3600` (immutable once written).
 

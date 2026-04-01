@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Settings, Volume2, VolumeX, Maximize2, Minimize2, VideoOff } from 'lucide-react'
+import { ArrowLeft, Settings, Volume2, VolumeX, Maximize2, Minimize2, VideoOff, Rewind, FastForward, Play, Pause, HelpCircle } from 'lucide-react'
 import { api, hlsUrl } from '../lib/api'
 import type { Camera, RecordingSegment } from '../lib/types'
 import HlsPlayer, { type HlsPlayerHandle } from '../components/HlsPlayer'
@@ -51,6 +51,12 @@ export default function CameraPage() {
   const playbackVideoRef = useRef<HTMLVideoElement>(null)
   const preloadRef       = useRef<HTMLVideoElement | null>(null)
 
+  // Playback controls state
+  const [isPaused,      setIsPaused]      = useState(true)
+  const [isReversing,   setIsReversing]   = useState(false)
+  const [showShortcuts, setShowShortcuts] = useState(false)
+  const reverseIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   // ── Fullscreen ────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -73,11 +79,7 @@ export default function CameraPage() {
     api.cameras.list().then((cams) => {
       setCamera(cams.find((c) => c.id === id) ?? null)
     }).catch(() => {
-      const fallback: Record<string, Camera> = {
-        cam1: { id: 'cam1', name: 'SE-Driveway', ip: '11.200.0.101', status: 'online' },
-        cam2: { id: 'cam2', name: 'NW-Front', ip: '11.200.0.102', status: 'online' },
-      }
-      setCamera(fallback[id] ?? null)
+      setCamera(null)
     })
   }, [id])
 
@@ -102,7 +104,7 @@ export default function CameraPage() {
     }).then(results => {
       if (!results) return
       const sorted = results.flat().sort((a, b) =>
-        new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+        a.startTime < b.startTime ? -1 : a.startTime > b.startTime ? 1 : 0
       )
       setAllSegments(sorted)
     }).catch(() => {})
@@ -120,7 +122,7 @@ export default function CameraPage() {
             const newSegs = r.segments.filter(s => !existing.has(s.id))
             if (newSegs.length === 0) return prev
             return [...prev, ...newSegs].sort((a, b) =>
-              new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+              a.startTime < b.startTime ? -1 : a.startTime > b.startTime ? 1 : 0
             )
           })
         })
@@ -139,6 +141,7 @@ export default function CameraPage() {
     } else {
       playerRef.current?.resume()
       playerRef.current?.setMuted(muted)
+      setIsReversing(false)
     }
   }, [mode])
 
@@ -225,6 +228,51 @@ export default function CameraPage() {
     }
   }, [mode, currentSegment, allSegments])
 
+  // Track play/pause state for the controls button icon
+  useEffect(() => {
+    const video = playbackVideoRef.current
+    if (!video) return
+    const onPlay  = () => setIsPaused(false)
+    const onPause = () => setIsPaused(true)
+    video.addEventListener('play',  onPlay)
+    video.addEventListener('pause', onPause)
+    return () => {
+      video.removeEventListener('play',  onPlay)
+      video.removeEventListener('pause', onPause)
+    }
+  }, [])
+
+  // Reverse playback: step currentTime backwards on a fixed interval.
+  // Each tick steps back (playbackRate × 0.2)s so reverse tracks the speed setting.
+  // Stops at start of segment rather than crossing boundaries.
+  useEffect(() => {
+    if (reverseIntervalRef.current) {
+      clearInterval(reverseIntervalRef.current)
+      reverseIntervalRef.current = null
+    }
+    if (!isReversing || mode !== 'playback') return
+    const video = playbackVideoRef.current
+    if (!video) return
+    video.pause()
+    const stepSec = Math.max(playbackRate, 1) * 0.2
+    reverseIntervalRef.current = setInterval(() => {
+      const v = playbackVideoRef.current
+      if (!v) return
+      if (v.currentTime <= stepSec) {
+        v.currentTime = 0
+        setIsReversing(false)
+      } else {
+        v.currentTime -= stepSec
+      }
+    }, 200)
+    return () => {
+      if (reverseIntervalRef.current) {
+        clearInterval(reverseIntervalRef.current)
+        reverseIntervalRef.current = null
+      }
+    }
+  }, [isReversing, mode, playbackRate])
+
   // Keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -233,10 +281,15 @@ export default function CameraPage() {
       switch (e.key) {
         case ' ':
           e.preventDefault()
-          if (mode === 'playback' && playbackVideoRef.current) {
-            playbackVideoRef.current.paused
-              ? playbackVideoRef.current.play().catch(() => {})
-              : playbackVideoRef.current.pause()
+          if (mode === 'playback') {
+            if (isReversing) {
+              setIsReversing(false)
+              playbackVideoRef.current?.play().catch(() => {})
+            } else if (playbackVideoRef.current?.paused) {
+              playbackVideoRef.current.play().catch(() => {})
+            } else {
+              playbackVideoRef.current?.pause()
+            }
           }
           break
         case 'l': case 'L':
@@ -274,11 +327,12 @@ export default function CameraPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [mode, currentSegment, allSegments])
+  }, [mode, currentSegment, allSegments, isReversing])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   function handleSeek(time: Date) {
+    setIsReversing(false)
     if (allSegments.length === 0) return
     const tMs = time.getTime()
 
@@ -325,6 +379,7 @@ export default function CameraPage() {
   }
 
   function handleGoLive() {
+    setIsReversing(false)
     setMode('live')
     setCurrentSegment(null)
     setPlaybackTime(null)
@@ -343,6 +398,34 @@ export default function CameraPage() {
     setScrubSegment(seg)
     setScrubFrameIndex(frameIndex)
     setScrubTimeMs(timeMs)
+  }
+
+  function handleBackward() {
+    if (mode !== 'playback') return
+    if (isReversing) {
+      setIsReversing(false)
+      playbackVideoRef.current?.pause()
+    } else {
+      setIsReversing(true)
+    }
+  }
+
+  function handlePlayPause() {
+    if (mode !== 'playback') return
+    if (isReversing) {
+      setIsReversing(false)
+      playbackVideoRef.current?.play().catch(() => {})
+    } else if (playbackVideoRef.current?.paused) {
+      playbackVideoRef.current.play().catch(() => {})
+    } else {
+      playbackVideoRef.current?.pause()
+    }
+  }
+
+  function handleForward() {
+    if (mode !== 'playback') return
+    setIsReversing(false)
+    playbackVideoRef.current?.play().catch(() => {})
   }
 
   function toggleMute() {
@@ -514,8 +597,8 @@ export default function CameraPage() {
             isLive={mode === 'live'}
             headerContent={
               <div className="flex items-center py-1 mb-0.5">
-                {/* Left: date picker, right-aligned */}
-                <div className="flex-1 flex items-center justify-end pr-3">
+                {/* Left: date picker + playback controls, right-aligned */}
+                <div className="flex-1 flex items-center gap-2 justify-end pr-3">
                   <input
                     type="date"
                     value={selectedDate}
@@ -539,6 +622,90 @@ export default function CameraPage() {
                     }}
                     className="bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-500 px-2 py-1 focus:outline-none focus:border-zinc-600"
                   />
+
+                  {/* Playback controls */}
+                  <div className="flex items-center gap-1">
+                    {/* Backward */}
+                    <button
+                      onClick={handleBackward}
+                      disabled={mode === 'live'}
+                      title="Play reverse (click again to pause)"
+                      className={`px-2 py-1 rounded text-xs border transition-colors ${
+                        mode === 'live'
+                          ? 'bg-zinc-900/40 text-zinc-700 border-zinc-800/50 cursor-default'
+                          : isReversing
+                            ? 'bg-sky-900/60 text-sky-300 border-sky-700'
+                            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      <Rewind size={12} />
+                    </button>
+
+                    {/* Play / Pause */}
+                    <button
+                      onClick={handlePlayPause}
+                      disabled={mode === 'live'}
+                      title={isPaused || isReversing ? 'Play' : 'Pause'}
+                      className={`px-2 py-1 rounded text-xs border transition-colors ${
+                        mode === 'live'
+                          ? 'bg-zinc-900/40 text-zinc-700 border-zinc-800/50 cursor-default'
+                          : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      {isPaused || isReversing ? <Play size={12} /> : <Pause size={12} />}
+                    </button>
+
+                    {/* Forward */}
+                    <button
+                      onClick={handleForward}
+                      disabled={mode === 'live'}
+                      title="Play forward"
+                      className={`px-2 py-1 rounded text-xs border transition-colors ${
+                        mode === 'live'
+                          ? 'bg-zinc-900/40 text-zinc-700 border-zinc-800/50 cursor-default'
+                          : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      <FastForward size={12} />
+                    </button>
+
+                    {/* Keyboard shortcuts */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowShortcuts(s => !s)}
+                        title="Keyboard shortcuts"
+                        className={`px-2 py-1 rounded text-xs border transition-colors ${
+                          showShortcuts
+                            ? 'bg-zinc-800 text-zinc-300 border-zinc-600'
+                            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                        }`}
+                      >
+                        <HelpCircle size={12} />
+                      </button>
+                      {showShortcuts && (
+                        <div className="absolute bottom-full right-0 mb-1 w-52 bg-zinc-900 border border-zinc-700 rounded shadow-xl p-2 z-50 text-[11px] text-zinc-400">
+                          <table className="w-full">
+                            <tbody>
+                              {([
+                                ['Space', 'Play / pause'],
+                                ['J', '−10 seconds'],
+                                ['K', 'Reset speed to 1×'],
+                                ['L', 'Speed up'],
+                                ['← →', 'Previous / next clip'],
+                                ['Home', 'First recording'],
+                                ['End', 'Go live'],
+                              ] as [string, string][]).map(([key, desc]) => (
+                                <tr key={key}>
+                                  <td className="pr-3 py-0.5 text-zinc-300 font-mono whitespace-nowrap">{key}</td>
+                                  <td className="py-0.5">{desc}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 {/* Center: time display — aligns with needle at 50% of bar */}

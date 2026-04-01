@@ -49,9 +49,13 @@ func (c *Cleaner) sweep() {
 	if days == 0 {
 		return // retention disabled — keep everything
 	}
-	// Cutoff is the start of day (UTC) exactly `days` ago.
-	// Date dirs strictly before cutoff are deleted.
-	cutoff := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -days)
+	// Cutoff is expressed as a local date string (YYYY-MM-DD) because recording
+	// directory names are in local time. Date dirs with names strictly less than
+	// the cutoff string are deleted. Using local time matches the indexer's prune
+	// logic so both always agree on what to delete.
+	now := time.Now()
+	y, m, d := now.Date()
+	cutoff := time.Date(y, m, d, 0, 0, 0, 0, time.Local).AddDate(0, 0, -days).Format("2006-01-02")
 
 	camDirs, err := os.ReadDir(c.nvrDir)
 	if err != nil {
@@ -65,6 +69,7 @@ func (c *Cleaner) sweep() {
 		}
 		serialDirs, err := os.ReadDir(filepath.Join(c.nvrDir, camEntry.Name()))
 		if err != nil {
+			log.Printf("[retention] read %s: %v", filepath.Join(c.nvrDir, camEntry.Name()), err)
 			continue
 		}
 		for _, serialEntry := range serialDirs {
@@ -77,7 +82,7 @@ func (c *Cleaner) sweep() {
 	}
 }
 
-func (c *Cleaner) sweepSerial(serialPath string, cutoff time.Time, days int) {
+func (c *Cleaner) sweepSerial(serialPath string, cutoff string, days int) {
 	dateDirs, err := os.ReadDir(serialPath)
 	if err != nil {
 		return
@@ -86,12 +91,14 @@ func (c *Cleaner) sweepSerial(serialPath string, cutoff time.Time, days int) {
 		if !entry.IsDir() {
 			continue
 		}
-		t, err := time.Parse("2006-01-02", entry.Name())
-		if err != nil {
-			continue // not a date dir (e.g. DVRWorkDirectory); skip
+		// Skip non-date dirs (e.g. DVRWorkDirectory). Date dirs are YYYY-MM-DD,
+		// which sort lexicographically — no need to parse to time.Time.
+		name := entry.Name()
+		if len(name) != 10 || name[4] != '-' || name[7] != '-' {
+			continue
 		}
-		if t.Before(cutoff) {
-			dirPath := filepath.Join(serialPath, entry.Name())
+		if name < cutoff {
+			dirPath := filepath.Join(serialPath, name)
 			log.Printf("[retention] deleting %s (retention: %d days)", dirPath, days)
 			if err := os.RemoveAll(dirPath); err != nil {
 				log.Printf("[retention] failed to delete %s: %v", dirPath, err)

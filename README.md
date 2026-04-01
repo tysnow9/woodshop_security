@@ -84,7 +84,7 @@ woodshop_security/
 │       │   ├── db.go                     # SQLite CRUD
 │       │   ├── schema.go                 # DB schema
 │       │   └── parse.go                  # Amcrest filename parser
-│       ├── retention/cleaner.go          # Hourly retention sweep
+│       ├── retention/cleaner.go          # Hourly retention sweep (local-time cutoff)
 │       └── settings/settings.go          # Thread-safe JSON settings store
 ├── frontend/
 │   └── src/

@@ -58,8 +58,11 @@ func OpenDB(path string) (*DB, error) {
 }
 
 // UpsertRecording inserts the row if file_path is new.
-// Returns (id, true, nil) on insert, (id, false, nil) if already existed.
-func (d *DB) UpsertRecording(r RecordingRow) (id int64, inserted bool, err error) {
+// Returns (row, true, nil) on insert, (row, false, nil) if already existed.
+// The returned row always has ID populated; on insert the other fields reflect
+// what was written; on conflict the full existing row is returned so callers
+// can check faststart/sprite status without a second round-trip.
+func (d *DB) UpsertRecording(r RecordingRow) (row RecordingRow, inserted bool, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -77,23 +80,24 @@ func (d *DB) UpsertRecording(r RecordingRow) (id int64, inserted bool, err error
 		r.FilePath, motionInt,
 	)
 	if err != nil {
-		return 0, false, fmt.Errorf("upsert recording: %w", err)
+		return RecordingRow{}, false, fmt.Errorf("upsert recording: %w", err)
 	}
 
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		id, _ = res.LastInsertId()
-		return id, true, nil
+		r.ID, _ = res.LastInsertId()
+		return r, true, nil
 	}
 
-	// Already existed — fetch the existing id.
-	err = d.sql.QueryRow(
-		`SELECT id FROM recordings WHERE file_path = ?`, r.FilePath,
-	).Scan(&id)
+	// Already existed — fetch the full row so the caller has faststart/sprite status.
+	existing, err := scanRow(d.sql.QueryRow(`SELECT
+		id, cam, serial, date, start_time, end_time,
+		file_path, motion, COALESCE(sprite_path,''), faststart, faststart_failed
+		FROM recordings WHERE file_path = ?`, r.FilePath))
 	if err != nil {
-		return 0, false, fmt.Errorf("fetch existing id: %w", err)
+		return RecordingRow{}, false, fmt.Errorf("fetch existing row: %w", err)
 	}
-	return id, false, nil
+	return existing, false, nil
 }
 
 // SetFaststartFailed marks a recording as permanently failed so the indexer

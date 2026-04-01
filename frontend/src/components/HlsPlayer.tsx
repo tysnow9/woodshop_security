@@ -61,11 +61,13 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
 
     if (Hls.isSupported()) {
       const hls = new Hls({
-        // 1s segments × liveSyncDurationCount=1 → ~2s target latency.
-        // liveMaxLatencyDurationCount=4 stays well within hls_list_size=8.
-        liveSyncDurationCount: 1,
-        liveMaxLatencyDurationCount: 4,
-        maxBufferLength: 6,
+        // 2 segments of buffer before playback starts. For the main stream
+        // (3s segments) this gives ~9s total latency but prevents the stall
+        // that occurs when the first segment ends before the next is ready.
+        // For the thumb stream (1s segments) the impact is negligible.
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 6,
+        maxBufferLength: 10,
         backBufferLength: 0,
       })
       hlsRef.current = hls

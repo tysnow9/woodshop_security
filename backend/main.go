@@ -167,6 +167,11 @@ func main() {
 
 		segs := make([]segment, 0, len(rows))
 		for _, r := range rows {
+			// Skip rows whose files were deleted (e.g. by the retention cleaner
+			// before the DB prune runs, or from a prior misconfigured cutoff).
+			if _, err := os.Stat(r.FilePath); err != nil {
+				continue
+			}
 			segs = append(segs, segment{
 				ID:          r.ID,
 				StartTime:   r.StartTime.UTC().Format("2006-01-02T15:04:05Z"),

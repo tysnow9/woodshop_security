@@ -166,8 +166,11 @@ func (ix *Indexer) fullScan(ctx context.Context) {
 		}
 
 		// Prune DB rows beyond retention window.
+		// Use local-midnight cutoff to match the retention cleaner's directory deletion logic.
 		if retention := ix.getRetention(); retention > 0 {
-			cutoff := time.Now().AddDate(0, 0, -retention).Format("2006-01-02")
+			now := time.Now()
+			y, m, d := now.Date()
+			cutoff := time.Date(y, m, d, 0, 0, 0, 0, time.Local).AddDate(0, 0, -retention).Format("2006-01-02")
 			if err := ix.db.PruneByDate(cam, cutoff); err != nil {
 				log.Printf("[indexer] prune cam=%s: %v", cam, err)
 			}
@@ -192,7 +195,7 @@ func (ix *Indexer) processFile(ctx context.Context, cam, serial, date, fullPath,
 		Motion:    info.Motion,
 	}
 
-	id, inserted, err := ix.db.UpsertRecording(row)
+	existing, inserted, err := ix.db.UpsertRecording(row)
 	if err != nil {
 		log.Printf("[indexer] upsert %q: %v", fullPath, err)
 		return
@@ -200,22 +203,18 @@ func (ix *Indexer) processFile(ctx context.Context, cam, serial, date, fullPath,
 
 	if inserted {
 		// New file — queue faststart first.
-		ix.enqueue(ctx, workItem{kind: workFaststart, rowID: id, path: fullPath})
+		ix.enqueue(ctx, workItem{kind: workFaststart, rowID: existing.ID, path: fullPath})
 		return
 	}
 
-	// Already in DB — check if work is still outstanding.
-	existing, err := ix.db.GetByID(id)
-	if err != nil {
-		return
-	}
+	// Already in DB — UpsertRecording returned the full existing row, no second query needed.
 	if existing.FaststartFailed {
 		return // permanent failure — never retry
 	}
 	if !existing.Faststart {
-		ix.enqueue(ctx, workItem{kind: workFaststart, rowID: id, path: fullPath})
+		ix.enqueue(ctx, workItem{kind: workFaststart, rowID: existing.ID, path: fullPath})
 	} else if existing.SpritePath == "" {
-		ix.enqueue(ctx, workItem{kind: workSprite, rowID: id, path: fullPath})
+		ix.enqueue(ctx, workItem{kind: workSprite, rowID: existing.ID, path: fullPath})
 	}
 }
 

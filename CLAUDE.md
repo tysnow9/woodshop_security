@@ -32,7 +32,7 @@ A self-hosted home security camera system for Amcrest PoE cameras. Captures RTSP
 ### Camera Settings (Amcrest Web UI)
 - **Video encode mode:** H.264 — do not switch to H.265; see Decisions below
 - **Bit rate:** 5120 Kb/s, CBR — switched from VBR to eliminate the I-frame quality pulse visible in daytime scenes (VBR allocates extra bits to keyframes, causing a brightness/detail flash every GOP)
-- **Frame Interval:** 60 frames (= 3 seconds at 20fps) — controls keyframe/GOP interval; determines HLS segment duration when stream-copying video (FFmpeg can only cut at keyframes); must stay at 60 to match `hls_time 3` in backend
+- **Frame Interval:** 40 frames (= 2 seconds at 20fps) — controls keyframe/GOP interval; determines HLS segment duration when stream-copying video (FFmpeg can only cut at keyframes); must stay at 40 to match `hls_time 2` in backend. **Rollback:** set to 60 and change `hls_time "3"`, `hlsListSize "5"` in `backend/internal/ffmpeg/manager.go`
 - **Audio sample rate:** 64kHz (camera default, kept as-is) — FFmpeg resamples to 48kHz during audio transcode; non-standard but handled cleanly by `aresample=async=1000`
 - **Audio noise filter:** Disabled (kept as-is)
 - **Microphone volume:** 50 (kept as-is)
@@ -68,7 +68,7 @@ cd frontend && npm run build
 # Then reload http://<server-ip>:8080
 ```
 
-## Current Status (as of 2026-03-31)
+## Current Status (as of 2026-04-01)
 
 ### ✅ Working
 - Live sub-stream (704×480) in camera grid thumbnails — muted autoplay, correct aspect ratio (704/480)
@@ -76,7 +76,7 @@ cd frontend && npm run build
 - Audio working in all browsers including Safari — mute/unmute persisted in localStorage
 - Fullscreen — button in top bar; Escape exits; button hidden on iOS (Safari doesn't support `requestFullscreen` on divs)
 - Zoom & pan — pinch/scroll to zoom (1×–8×), drag to pan, in both full camera view and combined view; works with trackpad, mouse, and touch via `react-zoom-pan-pinch`
-- ~6s latency vs raw RTSP (3s segments + hls.js liveSyncDurationCount:1; increased from ~3s when Frame Interval changed from 20→60 to fix I-frame flash)
+- ~6s latency vs raw RTSP (2s segments + hls.js liveSyncDurationCount:2; reduced from ~9s when Frame Interval changed from 60→40)
 - FFmpeg process manager: 4 processes (2 cameras × thumb + main), auto-restart on crash, graceful shutdown
 - **LAN access** — Go backend binds `0.0.0.0:8080`; accessible from any device on the home network after `npm run build`; tested on macOS Safari, iOS Safari, and Windows browsers
 - **Combined view** — third card in the grid shows both cameras stacked; full view plays both main streams simultaneously with true stereo audio via Web Audio API
@@ -93,6 +93,7 @@ cd frontend && npm run build
 - **Retention cleanup** — backend goroutine sweeps `/nvr` hourly, deletes date dirs older than configured window; `0` = disabled (keep forever); persisted to `./config/settings.json`; wired to Settings page dropdown (0–14 days); warns in UI when reducing retention
 - **NTP** — `chrony` installed and syncing (stratum 3); configured to serve LAN at `11.200.0.110:123`; `local stratum 10` fallback keeps cameras synced when internet is unavailable; both cameras confirmed querying the local server
 - **Recording indexer** — SQLite DB at `./config/recordings.db`; scans `/nvr` every 60s; faststart rewrite + sprite generation as background work (2 workers, `nice -n 15`, `1 thread`); `faststart_failed` flag marks corrupt files (no moov atom) to skip retries; `GET /api/recordings/dates?cam=` and `GET /api/recordings?cam=&date=`
+- **Playback controls** — ⏪ / ▶⏸ / ⏩ button group in the timeline header between the date picker and the playhead time; same disabled style as speed buttons in live mode; reverse playback steps backwards on a 200ms interval at current speed setting; ⏪ highlights while active; ? button toggles a keyboard-shortcut tooltip (floats above timeline bar)
 - **Playback UI** — fully working Timeline scrubber in CameraPage:
   - Live/playback mode toggle; HLS paused during playback to free CPU; live layer hides immediately on seek
   - Multi-day scroll; segment coloring (blue=regular, amber=motion); live edge red dot
@@ -149,7 +150,7 @@ Camera ──NFS───► Ubuntu /nvr/ (recordings/)            (recording, c
 | `{cam}-main` | main stream (subtype=0) | HLS to `hls/{cam}/main/` | video stream-copy, audio transcoded to 48kHz AAC |
 
 **HLS settings (thumb):** 1-second segments (`hls_time 1`), 8-segment rolling window (`hls_list_size 8`), `program_date_time` tags — thumb transcodes so FFmpeg inserts keyframes freely
-**HLS settings (main):** 3-second segments (`hls_time 3`), 5-segment rolling window (`hls_list_size 5`), `program_date_time` tags — stream-copy requires segment boundaries to align with camera keyframes (Frame Interval 60 = 3s GOP)
+**HLS settings (main):** 2-second segments (`hls_time 2`), 7-segment rolling window (`hls_list_size 7`), `program_date_time` tags — stream-copy requires segment boundaries to align with camera keyframes (Frame Interval 40 = 2s GOP)
 **Input flags:** `-rtsp_transport udp -use_wallclock_as_timestamps 1`
 **Main stream audio:** `-c:a aac -ar 48000 -b:a 128k -af aresample=async=1000`
 
@@ -158,9 +159,9 @@ Why transcode audio instead of stream-copying: the Amcrest RTSP stream carries A
 Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=1` only allowed 1 sample/second of drift correction, so larger timestamp jumps passed through as audio gaps. `async=1000` gives a ~20ms/second correction budget, keeping audio continuous via stretching/squeezing rather than silence insertion.
 
 ### HLS Latency
-- Camera Frame Interval 60 frames → 3s keyframe interval → 3s segments for stream-copy
-- `hls_time 3` + `hls_list_size 5` → 15 seconds of playlist window
-- hls.js `liveSyncDurationCount: 1` → ~6s behind live edge → ~6s total vs raw RTSP
+- Camera Frame Interval 40 frames → 2s keyframe interval → 2s segments for stream-copy
+- `hls_time 2` + `hls_list_size 7` → 14 seconds of playlist window
+- hls.js `liveSyncDurationCount: 2` → ~6s behind live edge → ~6s total vs raw RTSP
 
 ### HLS Serving (critical detail)
 `live.m3u8` playlists are served with a **custom no-cache handler** — `Cache-Control: no-cache, no-store`, read directly from disk via `os.ReadFile`. Fiber's default static handler caches file metadata for 10 seconds, which caused hls.js to receive stale 304 responses for up to 10 seconds while FFmpeg wrote new segments every second (manifested as stream freezing every ~10s). `.ts` segments use the standard static handler with `MaxAge: 3600` since they are immutable once written.
@@ -177,7 +178,7 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 - `backend/main.go` — entry point, Fiber routes, FFmpeg manager startup; `STATIC_DIR` defaults to `../frontend/dist` so `go run .` serves the built SPA directly
 - `backend/internal/ffmpeg/manager.go` — FFmpeg subprocess lifecycle (start, monitor, restart with exponential backoff)
 - `backend/internal/settings/settings.go` — thread-safe JSON settings store; atomic write via temp file + rename; defaults to 7-day retention if no file exists
-- `backend/internal/retention/cleaner.go` — hourly goroutine; walks `/nvr/cam*/serial/YYYY-MM-DD/` dirs, deletes any dated dir older than `retentionDays`; skips non-date dirs (e.g. `DVRWorkDirectory`); `retentionDays=0` disables cleanup entirely
+- `backend/internal/retention/cleaner.go` — hourly goroutine; walks `/nvr/cam*/serial/YYYY-MM-DD/` dirs, deletes any dated dir older than `retentionDays`; skips non-date dirs (e.g. `DVRWorkDirectory`); `retentionDays=0` disables cleanup entirely; cutoff computed from local-midnight (not UTC) to stay consistent with recording filenames and the indexer's DB prune
 - `GET /api/cameras` — camera list
 - `GET /api/health` — health check
 - `GET /api/settings` — returns `{retentionDays}`
@@ -185,7 +186,7 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 - `GET /hls/:cam/:stream/live.m3u8` — no-cache playlist handler
 - `GET /hls/**` — static segment handler (cached)
 - `GET /api/recordings/dates?cam=` — distinct dates with recordings, newest first
-- `GET /api/recordings?cam=&date=` — all segments for a camera+date, sorted by start_time
+- `GET /api/recordings?cam=&date=` — all segments for a camera+date, sorted by start_time; rows whose file no longer exists on disk are silently filtered out (handles orphaned DB rows from retention cutoff races)
 - `GET /recordings/:id/video` — serves the .mp4 file with HTTP range support (206 partial)
 - `GET /recordings/:id/sprite` — serves the .sprite.jpg contact sheet
 - React SPA static files in production
@@ -202,13 +203,13 @@ Why `aresample=async=1000`: the camera produces jittery RTSP timestamps. `async=
 - `src/lib/api.ts` — fetch wrappers, `hlsUrl()` helper
 - `src/lib/types.ts` — `Camera` type
 - `src/lib/dualSettings.ts` — shared `DualSettings` type, `getDualSettings()` / `saveDualSettings()`; also exports `CAM_NAMES` and `OTHER_CAM` mappings used across Combined-related components
-- `src/components/HlsPlayer.tsx` — hls.js player; `forwardRef` exposes `setMuted()` for synchronous unmute inside click handlers (required by browser autoplay policy); `startMuted` captured at mount via ref so mute toggles don't rebuild the player
+- `src/components/HlsPlayer.tsx` — hls.js player; `forwardRef` exposes `setMuted()` for synchronous unmute inside click handlers (required by browser autoplay policy); `startMuted` captured at mount via ref so mute toggles don't rebuild the player; `liveSyncDurationCount: 2` keeps 2 segments buffered (prevents initial-load stall at segment boundary cost of ~9s→~6s was then recovered by Frame Interval 60→40)
 - `src/components/CameraCard.tsx` — thumbnail grid card, sub stream, aspect ratio `704/480`
 - `src/components/CameraGrid.tsx` — responsive grid; reads `nvr_card_order` and `nvr_enabled` from localStorage on mount to render cards in saved order with correct visibility
 - `src/components/DualCard.tsx` — "Combined" grid card; stacked thumbnails (two `704/240` strips = same height as a single `704/480` card); reads `dualSettings` to show correct L/R assignment in footer
 - `src/components/Layout.tsx` — top nav
 - `src/pages/Dashboard.tsx` — camera grid, fetches `/api/cameras`
-- `src/pages/CameraPage.tsx` — full camera view with live/playback modes; loads ALL available dates' segments on mount (`Promise.all` across all dates), polls every 60s for today's new segments; `allSegments` sorted array passed to Timeline; HLS player kept mounted but opacity-0 during playback (no rebuffering on switch back); playback `<video>` also opacity-0 while scrubbing (last decoded frame stays visible under sprite overlay); `canplay` timeout (5s) prevents infinite spinner on corrupt files; `handleSeek` uses 30s threshold — no snap to distant segment; instead sets `currentSegment=null` and shows "No recording" overlay; `onViewCenterChange` from Timeline drives time display and time-edit; controls (date picker, time, speed buttons, Go Live) in `headerContent` prop so time field is exactly centered on needle; next segment preloaded when <30s remaining; HlsPlayer handle: `setMuted`, `pause`, `resume`
+- `src/pages/CameraPage.tsx` — full camera view with live/playback modes; loads ALL available dates' segments on mount (`Promise.all` across all dates), polls every 60s for today's new segments; `allSegments` sorted array passed to Timeline; HLS player kept mounted but opacity-0 during playback (no rebuffering on switch back); playback `<video>` also opacity-0 while scrubbing (last decoded frame stays visible under sprite overlay); `canplay` timeout (5s) prevents infinite spinner on corrupt files; `handleSeek` uses 30s threshold — no snap to distant segment; instead sets `currentSegment=null` and shows "No recording" overlay; `onViewCenterChange` from Timeline drives time display and time-edit; controls (date picker, playback buttons, time, speed buttons, Go Live) in `headerContent` prop so time field is exactly centered on needle; playback controls: ⏪ reverse (200ms interval, steps back `playbackRate×0.2s`), ▶/⏸ play-pause, ⏩ forward, ? keyboard shortcut tooltip; `isReversing` state cleared on seek/goLive/mode-change; next segment preloaded when <30s remaining; HlsPlayer handle: `setMuted`, `pause`, `resume`
 - `src/components/Timeline.tsx` — RAF-based scrubber; hot-path refs + RAF flush pattern (no React re-renders during interaction); `minMs`/`maxMs` props; `jumpToMs` prop snaps view; `headerContent` slot above bar (same column width as bar — ensures 50% of headerContent = needle position); `onLive` prop removed — Go Live in CameraPage's headerContent; bar is full width (no sidebar button); `userHasPannedRef` blocks both live-tick and playback auto-scroll from overriding manual pan; label intervals auto-scale with zoom (60s–10800s); min segment width 2px; needle white/90 playback, white/20 live; live edge red dot; 5 nearest sprites pre-fetched as hidden `<img>` tags; wheel debounce 500ms; zoom: shift+wheel anchored to mouse position
 - `src/pages/DualCameraPage.tsx` — Combined full view; two main streams stacked; Web Audio API stereo routing via `StereoPannerNode` + per-channel `GainNode`s; graph built lazily on first Unmute (avoids StrictMode `createMediaElementSource` pitfall); inline settings panel for live balance + L/R swap; balance correctly negated when channels are swapped; mute also sets `video.muted` directly because Safari's `createMediaElementSource()` doesn't fully disconnect native audio output; Safari detected via UA and forced onto native HLS path (skips hls.js) because MSE/hls.js + `createMediaElementSource` doesn't capture audio on WebKit; stall recovery (`video.load()`) on native HLS path
 - `src/pages/Settings.tsx` — camera/combined rows with drag-to-reorder (GripVertical, HTML5 DnD) and functional show/hide toggles; saves to `nvr_card_order` and `nvr_enabled`; retention dropdown (0 = Off, 1–14 days) fetched from and saved to `GET/PUT /api/settings`; warns when reducing retention
@@ -250,6 +251,8 @@ Attempted fix: VAAPI hardware transcode (H.265 → H.264 via Intel UHD 630). Fai
 Noticed in daytime: pixels would flash bright/dark at exactly 1-second intervals; not visible in IR/night or in the Home app (Scrypted re-encodes at 1080p, smoothing the artifact). Root cause: VBR encoder allocates a large bit budget to each I-frame (all macroblocks refreshed) and far fewer bits to the 19 trailing P-frames, creating a visible quality pulse in high-detail outdoor scenes. Home app looks better because Scrypted's transcode redistributes bits evenly.
 
 **Fix:** switched camera from VBR → CBR (5120 Kbps) to prevent the encoder from "saving up" bits for keyframes, and increased Frame Interval from 20 → 60 frames (1s → 3s GOP) so the refresh happens every 3 seconds rather than every 1. Backend `hls_time` updated from 1 → 3 to match. Trade-off: latency increases from ~3s to ~6s.
+
+Frame Interval later reduced from 60 → 40 (3s → 2s GOP) to recover latency. With CBR already in place the I-frame pulse did not return. `hls_time` updated from 3 → 2, `hls_list_size` from 5 → 7. hls.js `liveSyncDurationCount` raised from 1 → 2 for buffer stability. Net result: ~6s latency (same as original 20-frame/VBR era) but stable. **To revert to 3s segments:** set camera Frame Interval back to 60 and in `backend/internal/ffmpeg/manager.go` set `hlsTime = "3"`, `hlsListSize = "5"`; set hls.js `liveSyncDurationCount: 1`, `liveMaxLatencyDurationCount: 4`, `maxBufferLength: 6` in `frontend/src/components/HlsPlayer.tsx`.
 
 ### Recording architecture — camera NAS (NFS) over FFmpeg segment muxer
 Original plan was to add a recording FFmpeg process per camera writing `.mp4` segments. Revised to camera-side NAS recording because:
