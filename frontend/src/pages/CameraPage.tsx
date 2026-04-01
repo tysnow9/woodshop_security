@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Settings, Volume2, VolumeX, Maximize2, Minimize2 } from 'lucide-react'
+import { ArrowLeft, Settings, Volume2, VolumeX, Maximize2, Minimize2, VideoOff } from 'lucide-react'
 import { api, hlsUrl } from '../lib/api'
 import type { Camera, RecordingSegment } from '../lib/types'
 import HlsPlayer, { type HlsPlayerHandle } from '../components/HlsPlayer'
 import Timeline from '../components/Timeline'
+import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch'
 
 type Mode = 'live' | 'playback'
 
@@ -28,7 +29,8 @@ export default function CameraPage() {
   const [mode, setMode]                   = useState<Mode>('live')
   const [selectedDate, setSelectedDate]   = useState<string>(() => localDateStr())
   const [playbackReady, setPlaybackReady] = useState(false)
-  const [segments, setSegments]           = useState<RecordingSegment[]>([])
+  const [allSegments, setAllSegments]     = useState<RecordingSegment[]>([])
+  const [jumpToMs, setJumpToMs]           = useState<number | undefined>(undefined)
   const [currentSegment, setCurrentSegment] = useState<RecordingSegment | null>(null)
   const [seekOffset, setSeekOffset]       = useState(0)
   const [playbackTime, setPlaybackTime]   = useState<Date | null>(null)
@@ -38,6 +40,13 @@ export default function CameraPage() {
   const [scrubbing, setScrubbing]             = useState(false)
   const [scrubSegment, setScrubSegment]       = useState<RecordingSegment | null>(null)
   const [scrubFrameIndex, setScrubFrameIndex] = useState(0)
+  const [scrubTimeMs, setScrubTimeMs]         = useState(0)
+
+  // Timeline needle time — broadcast from Timeline via onViewCenterChange
+  const [timelineCenterMs, setTimelineCenterMs] = useState(() => Date.now())
+  const [editingTime, setEditingTime]            = useState(false)
+  const [timeInput, setTimeInput]                = useState('')
+  const timeInputRef                             = useRef<HTMLInputElement>(null)
 
   const playbackVideoRef = useRef<HTMLVideoElement>(null)
   const preloadRef       = useRef<HTMLVideoElement | null>(null)
@@ -74,54 +83,61 @@ export default function CameraPage() {
 
   // ── Recordings effects ────────────────────────────────────────────────────
 
-  // On camera load, default to the most recent date that has recordings if
-  // today has none yet (e.g. backend just started and hasn't indexed today's files).
+  // Load all available dates' segments once on camera mount.
   useEffect(() => {
     if (!camera) return
-    const today = localDateStr()
     api.recordings.listDates(camera.id).then(r => {
-      if (r.dates.length > 0 && !r.dates.includes(today)) {
+      if (r.dates.length === 0) return
+      // Default selected date to most recent if today has no recordings.
+      const today = localDateStr()
+      if (!r.dates.includes(today)) {
         setSelectedDate(r.dates[0])
       }
+      // Fetch segments for every date in parallel.
+      return Promise.all(r.dates.map(d =>
+        api.recordings.listByDate(camera.id, d)
+          .then(res => res.segments)
+          .catch(() => [] as RecordingSegment[])
+      ))
+    }).then(results => {
+      if (!results) return
+      const sorted = results.flat().sort((a, b) =>
+        new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+      )
+      setAllSegments(sorted)
     }).catch(() => {})
   }, [camera])
 
-  // Reset to live when date changes
-  useEffect(() => {
-    setMode('live')
-    setCurrentSegment(null)
-    setPlaybackTime(null)
-    setSegments([])
-  }, [selectedDate])
-
-  // Load segments when date or camera changes
-  useEffect(() => {
-    if (!camera || !selectedDate) return
-    api.recordings.listByDate(camera.id, selectedDate)
-      .then(r => setSegments(r.segments))
-      .catch(() => setSegments([]))
-  }, [camera, selectedDate])
-
-  // Poll for new segments every 60s when viewing today
+  // Poll every 60s to pick up new segments recorded today.
   useEffect(() => {
     if (!camera) return
-    const today = localDateStr()
-    if (selectedDate !== today) return
     const interval = setInterval(() => {
-      api.recordings.listByDate(camera.id, selectedDate)
-        .then(r => setSegments(r.segments))
+      const today = localDateStr()
+      api.recordings.listByDate(camera.id, today)
+        .then(r => {
+          setAllSegments(prev => {
+            const existing = new Set(prev.map(s => s.id))
+            const newSegs = r.segments.filter(s => !existing.has(s.id))
+            if (newSegs.length === 0) return prev
+            return [...prev, ...newSegs].sort((a, b) =>
+              new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+            )
+          })
+        })
         .catch(() => {})
     }, 60_000)
     return () => clearInterval(interval)
-  }, [camera, selectedDate])
+  }, [camera])
 
-  // Mute/unmute the HLS live player based on mode.
-  // The live player runs hidden (opacity-0) during playback — we must silence it
-  // explicitly since opacity doesn't affect audio.
+  // Pause/resume HLS and sync mute based on mode.
+  // During playback the HLS player is opacity-0 but still decoding — pause it
+  // to eliminate the CPU/GPU contention that causes choppy playback.
   useEffect(() => {
     if (mode === 'playback') {
+      playerRef.current?.pause()
       playerRef.current?.setMuted(true)
     } else {
+      playerRef.current?.resume()
       playerRef.current?.setMuted(muted)
     }
   }, [mode])
@@ -138,13 +154,20 @@ export default function CameraPage() {
       video.playbackRate = playbackRate
       video.play().catch(() => {})
       setPlaybackReady(true)
+      cleanup()
+    }
+    // If canplay never fires (e.g. corrupt file), show whatever the video
+    // element has after 5 seconds rather than spinning indefinitely.
+    const timeoutId = setTimeout(() => { setPlaybackReady(true); cleanup() }, 5000)
+    function cleanup() {
       video.removeEventListener('canplay', onCanPlay)
+      clearTimeout(timeoutId)
     }
 
     video.src = currentSegment.videoUrl
     video.load()
     video.addEventListener('canplay', onCanPlay)
-    return () => video.removeEventListener('canplay', onCanPlay)
+    return () => cleanup()
   }, [currentSegment, seekOffset, mode])
 
   // Sync playbackRate to video element
@@ -170,12 +193,12 @@ export default function CameraPage() {
   useEffect(() => {
     if (mode !== 'playback' || !currentSegment || !playbackVideoRef.current) return
     const video = playbackVideoRef.current
-    const idx = segments.findIndex(s => s.id === currentSegment.id)
+    const idx = allSegments.findIndex(s => s.id === currentSegment.id)
 
     function onTimeUpdate() {
       const remaining = currentSegment!.durationSec - video.currentTime
       if (remaining < 30 && !preloadRef.current && idx >= 0) {
-        const next = segments[idx + 1]
+        const next = allSegments[idx + 1]
         if (next) {
           const el = document.createElement('video')
           el.src = next.videoUrl
@@ -185,7 +208,7 @@ export default function CameraPage() {
       }
     }
     function onEnded() {
-      const next = idx >= 0 ? segments[idx + 1] : undefined
+      const next = idx >= 0 ? allSegments[idx + 1] : undefined
       if (next) {
         setCurrentSegment(next)
         setSeekOffset(0)
@@ -200,7 +223,7 @@ export default function CameraPage() {
       video.removeEventListener('ended', onEnded)
       preloadRef.current = null
     }
-  }, [mode, currentSegment, segments])
+  }, [mode, currentSegment, allSegments])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -229,20 +252,20 @@ export default function CameraPage() {
           break
         case 'ArrowRight':
           if (mode === 'playback' && currentSegment) {
-            const idx = segments.findIndex(s => s.id === currentSegment.id)
-            const next = segments[idx + 1]
+            const idx = allSegments.findIndex(s => s.id === currentSegment.id)
+            const next = allSegments[idx + 1]
             if (next) { setCurrentSegment(next); setSeekOffset(0) }
           }
           break
         case 'ArrowLeft':
           if (mode === 'playback' && currentSegment) {
-            const idx = segments.findIndex(s => s.id === currentSegment.id)
-            const prev = segments[idx - 1]
+            const idx = allSegments.findIndex(s => s.id === currentSegment.id)
+            const prev = allSegments[idx - 1]
             if (prev) { setCurrentSegment(prev); setSeekOffset(0) }
           }
           break
         case 'Home':
-          if (segments.length > 0) { setCurrentSegment(segments[0]); setSeekOffset(0); setMode('playback') }
+          if (allSegments.length > 0) { setCurrentSegment(allSegments[0]); setSeekOffset(0); setMode('playback') }
           break
         case 'End':
           handleGoLive()
@@ -251,29 +274,45 @@ export default function CameraPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [mode, currentSegment, segments])
+  }, [mode, currentSegment, allSegments])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   function handleSeek(time: Date) {
-    if (segments.length === 0) return
+    if (allSegments.length === 0) return
     const tMs = time.getTime()
 
     // Try exact match first (needle is inside a recorded segment).
-    let seg = segments.find(s =>
+    let seg = allSegments.find(s =>
       new Date(s.startTime).getTime() <= tMs &&
       new Date(s.endTime).getTime()   >= tMs
     )
 
-    // Fall back to the segment whose start time is nearest to the seek point.
-    // This means any click/drag on the timeline initiates playback — the user
-    // doesn't have to center the needle precisely on a thin segment block.
+    // Fall back to nearest segment — but only if within 30 seconds.
+    // A larger gap means the user is pointing at a genuine recording gap;
+    // entering playback with no segment shows "No recording" instead of
+    // jumping to a random segment far away.
     if (!seg) {
-      seg = segments.reduce((best, s) => {
+      const nearest = allSegments.reduce((best, s) => {
         const d    = Math.abs(new Date(s.startTime).getTime() - tMs)
         const dBest = Math.abs(new Date(best.startTime).getTime() - tMs)
         return d < dBest ? s : best
       })
+      const nearestDistMs = Math.min(
+        Math.abs(new Date(nearest.startTime).getTime() - tMs),
+        Math.abs(new Date(nearest.endTime).getTime() - tMs),
+      )
+      if (nearestDistMs <= 30_000) seg = nearest
+    }
+
+    if (!seg) {
+      // Genuine gap — enter playback mode but show "No recording" overlay.
+      setCurrentSegment(null)
+      setMode('playback')
+      setPlaybackTime(time)
+      setPlaybackRate(1)
+      setPlaybackReady(false)
+      return
     }
 
     const segStartMs = new Date(seg.startTime).getTime()
@@ -298,10 +337,12 @@ export default function CameraPage() {
     isScrubbing: boolean,
     seg: RecordingSegment | null,
     frameIndex: number,
+    timeMs: number,
   ) {
     setScrubbing(isScrubbing)
     setScrubSegment(seg)
     setScrubFrameIndex(frameIndex)
+    setScrubTimeMs(timeMs)
   }
 
   function toggleMute() {
@@ -337,14 +378,6 @@ export default function CameraPage() {
             <ArrowLeft size={16} />
           </button>
           <span className="text-sm font-medium text-zinc-100">{camera.name}</span>
-
-          <input
-            type="date"
-            value={selectedDate}
-            max={localDateStr()}
-            onChange={e => setSelectedDate(e.target.value)}
-            className="bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-200 px-2 py-1 focus:outline-none focus:border-sky-500"
-          />
 
           <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border ${
             mode === 'live'
@@ -393,12 +426,16 @@ export default function CameraPage() {
       <div ref={videoAreaRef} className="flex-1 flex flex-col min-h-0 overflow-hidden">
 
         {/* Layered video area */}
-        <div className="relative flex-1 min-h-0 bg-black">
-          {/* Live HLS stream — stays visible until playback video is ready to
-              avoid a black flash on transition. Hidden (but still running) during
-              playback so we can switch back to live instantly. */}
+        <TransformWrapper minScale={1} maxScale={8} limitToBounds={true}>
+        <TransformComponent
+          wrapperStyle={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }}
+          contentStyle={{ width: '100%', height: '100%', position: 'relative', background: 'black' }}
+        >
+        <div className="absolute inset-0">
+          {/* Live HLS stream — hidden immediately when user seeks into playback.
+              Kept mounted so switching back to live is instant (no rebuffering). */}
           <div className={`absolute inset-0 transition-opacity duration-200 ${
-            mode === 'live' || !playbackReady ? 'opacity-100' : 'opacity-0 pointer-events-none'
+            mode === 'live' ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}>
             <HlsPlayer
               ref={playerRef}
@@ -410,8 +447,8 @@ export default function CameraPage() {
             />
           </div>
 
-          {/* Playback video — fades in once canplay fires (playbackReady).
-              opacity:0 while scrubbing keeps last decoded frame visible. */}
+          {/* Playback video — shown once canplay fires; opacity:0 while scrubbing
+              keeps the last decoded frame visible so the sprite overlay has context. */}
           <video
             ref={playbackVideoRef}
             playsInline
@@ -420,21 +457,36 @@ export default function CameraPage() {
             style={{ opacity: mode === 'playback' && playbackReady && !scrubbing ? 1 : 0 }}
           />
 
-          {/* Sprite thumbnail overlay — shown while scrubbing */}
+          {/* Loading indicator while playback video is buffering */}
+          {mode === 'playback' && !playbackReady && !scrubbing && currentSegment && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-8 h-8 border-2 border-zinc-600 border-t-sky-400 rounded-full animate-spin" />
+            </div>
+          )}
+
+          {/* Gap overlay — shown while scrubbing in a gap OR stopped in a gap */}
+          {((scrubbing && !scrubSegment) || (!scrubbing && mode === 'playback' && !currentSegment)) && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-30 bg-black/60">
+              <VideoOff size={36} className="text-zinc-600" />
+              <span className="text-xs text-zinc-500 mt-2">No recording</span>
+            </div>
+          )}
+
+          {/* Sprite thumbnail overlay — shown while scrubbing over a segment */}
           {scrubbing && scrubSegment?.hasSprite && (
             <div
               className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
                          rounded overflow-hidden border border-zinc-600 shadow-2xl z-30"
             >
               <div style={{
-                width: 160, height: 90,
+                width: 320, height: 180,
                 backgroundImage: `url(${scrubSegment.spriteUrl})`,
-                backgroundPosition: `-${scrubFrameIndex * 160}px 0px`,
+                backgroundPosition: `-${scrubFrameIndex * 320}px 0px`,
                 backgroundRepeat: 'no-repeat',
-                backgroundSize: 'auto 90px',
+                backgroundSize: 'auto 180px',
               }} />
               <div className="bg-zinc-900 text-[11px] text-zinc-300 text-center py-0.5 px-1">
-                {new Date(playbackTime?.getTime() ?? Date.now()).toLocaleTimeString([], {
+                {new Date(scrubTimeMs).toLocaleTimeString([], {
                   hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
                 })}
                 {scrubSegment.motion && <span className="ml-1.5 text-amber-400">Motion</span>}
@@ -442,39 +494,129 @@ export default function CameraPage() {
             </div>
           )}
         </div>
+        </TransformComponent>
+        </TransformWrapper>
 
-        {/* Playback speed controls */}
-        {mode === 'playback' && (
-          <div className="flex items-center justify-center gap-1 py-1 shrink-0 border-t border-zinc-800/50">
-            {[0.5, 1, 2, 4].map(rate => (
-              <button
-                key={rate}
-                onClick={() => setPlaybackRate(rate)}
-                className={`px-2 py-0.5 rounded text-[11px] font-mono border transition-colors ${
-                  playbackRate === rate
-                    ? 'bg-sky-900/60 text-sky-300 border-sky-700'
-                    : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
-                }`}
-              >
-                {rate}×
-              </button>
-            ))}
-            <span className="ml-2 text-[10px] text-zinc-600">
-              J/K/L to jog · Space to pause · ←/→ segments
-            </span>
-          </div>
-        )}
-
-        {/* Timeline */}
+        {/* Timeline — controls are rendered as headerContent above the bar,
+            scoped to bar width so the time field aligns exactly with the needle */}
         <div className="shrink-0 border-t border-zinc-800">
           <Timeline
-            segments={segments}
-            date={selectedDate}
+            segments={allSegments}
+            minMs={allSegments.length > 0
+              ? new Date(allSegments[0].startTime).getTime()
+              : Date.now() - 24 * 3600 * 1000}
+            maxMs={Date.now()}
+            jumpToMs={jumpToMs}
             currentTime={playbackTime}
             onSeek={handleSeek}
-            onLive={handleGoLive}
             onScrubChange={handleScrubChange}
+            onViewCenterChange={setTimelineCenterMs}
             isLive={mode === 'live'}
+            headerContent={
+              <div className="flex items-center py-1 mb-0.5">
+                {/* Left: date picker, right-aligned */}
+                <div className="flex-1 flex items-center justify-end pr-3">
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    max={localDateStr()}
+                    onChange={e => {
+                      const d = e.target.value
+                      if (!d) return
+                      setSelectedDate(d)
+                      const [y, mo, dd] = d.split('-').map(Number)
+                      const targetMs = new Date(y, mo - 1, dd).getTime()
+                      setJumpToMs(targetMs)
+                      if (mode === 'playback') {
+                        const dayStartMs = new Date(y, mo - 1, dd, 0, 0, 0).getTime()
+                        const dayEndMs   = new Date(y, mo - 1, dd, 23, 59, 59).getTime()
+                        const daySeg = allSegments.find(s => {
+                          const t = new Date(s.startTime).getTime()
+                          return t >= dayStartMs && t <= dayEndMs
+                        })
+                        if (daySeg) handleSeek(new Date(daySeg.startTime))
+                      }
+                    }}
+                    className="bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-500 px-2 py-1 focus:outline-none focus:border-zinc-600"
+                  />
+                </div>
+
+                {/* Center: time display — aligns with needle at 50% of bar */}
+                {editingTime ? (
+                  <input
+                    ref={timeInputRef}
+                    className="bg-zinc-800 border border-sky-600 rounded px-2 py-1 text-xs text-zinc-100 w-24 text-center outline-none shrink-0"
+                    value={timeInput}
+                    placeholder="HH:MM:SS"
+                    onChange={e => setTimeInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const parts = timeInput.split(':').map(Number)
+                        if (parts.length >= 2 && !parts.some(isNaN)) {
+                          const base = new Date(timelineCenterMs)
+                          const seekDate = new Date(
+                            base.getFullYear(), base.getMonth(), base.getDate(),
+                            parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0,
+                          )
+                          handleSeek(seekDate)
+                          setJumpToMs(seekDate.getTime())
+                        }
+                        setEditingTime(false)
+                      } else if (e.key === 'Escape') {
+                        setEditingTime(false)
+                      }
+                    }}
+                    onBlur={() => setEditingTime(false)}
+                  />
+                ) : (
+                  <button
+                    onClick={() => {
+                      const t = new Date(timelineCenterMs)
+                      setTimeInput(
+                        `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}:${String(t.getSeconds()).padStart(2,'0')}`
+                      )
+                      setEditingTime(true)
+                      setTimeout(() => timeInputRef.current?.select(), 0)
+                    }}
+                    className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-300 hover:border-zinc-600 hover:text-zinc-100 transition-colors w-24 text-center shrink-0"
+                    title="Click to jump to a time"
+                  >
+                    {new Date(timelineCenterMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                  </button>
+                )}
+
+                {/* Right: playback speed + Go Live, left-aligned */}
+                <div className="flex-1 flex items-center gap-1 pl-3">
+                  {[0.5, 1, 2, 4, 8].map(rate => (
+                    <button
+                      key={rate}
+                      onClick={() => { if (mode === 'playback') setPlaybackRate(rate) }}
+                      disabled={mode === 'live'}
+                      className={`px-2 py-1 rounded text-xs font-mono border transition-colors ${
+                        mode === 'live'
+                          ? 'bg-zinc-900/40 text-zinc-700 border-zinc-800/50 cursor-default'
+                          : playbackRate === rate
+                            ? 'bg-sky-900/60 text-sky-300 border-sky-700'
+                            : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      {rate}×
+                    </button>
+                  ))}
+                  <button
+                    onClick={handleGoLive}
+                    disabled={mode === 'live'}
+                    className={`ml-2 px-2 py-1 rounded text-xs font-semibold border transition-colors ${
+                      mode === 'live'
+                        ? 'bg-red-950/60 text-red-400 border-red-900/50 cursor-default'
+                        : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:border-sky-600 hover:text-sky-400'
+                    }`}
+                  >
+                    {mode === 'live' ? '● Live' : 'Go Live'}
+                  </button>
+                </div>
+              </div>
+            }
           />
         </div>
       </div>

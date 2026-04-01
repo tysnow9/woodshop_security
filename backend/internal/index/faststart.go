@@ -17,6 +17,7 @@ func runFaststart(ctx context.Context, src string) error {
 
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx,
+		"nice", "-n", "15",
 		"ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-i", src,

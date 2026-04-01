@@ -10,7 +10,8 @@ import (
 )
 
 // generateSprite creates a horizontal contact sheet: 1 frame per 10 seconds,
-// tiled in a single row, each frame scaled to 640×360px.
+// tiled in a single row, each frame scaled to 240×135px.
+// Max 270 frames (270×240 = 64,800px — under JPEG's 65,500px row limit).
 // Output: same dir as src, same basename, extension ".sprite.jpg"
 // e.g. /nvr/.../13.44.52-13.52.27[R][0@0][0].sprite.jpg
 // Returns the sprite path on success.
@@ -24,13 +25,16 @@ func generateSprite(ctx context.Context, srcPath string) (string, error) {
 
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx,
+		"nice", "-n", "15",
 		"ffmpeg",
-		"-skip_frame", "noref",
+		"-skip_frame", "nokey",  // decode I-frames only (one per 3s GOP) — much lower CPU
+		"-threads", "1",         // cap at 1 core so live HLS transcoding is not starved
 		"-hide_banner", "-loglevel", "error",
 		"-i", srcPath,
-		"-vf", "fps=1/10,scale=640:360,tile=500x1",
+		"-vf", "fps=1/10,scale=240:135,tile=270x1",
 		"-frames:v", "1",
 		"-q:v", "3",
+		"-strict", "unofficial", // allow limited-range YUV in MJPEG (camera native format)
 		spritePath,
 	)
 	cmd.Stderr = &stderr

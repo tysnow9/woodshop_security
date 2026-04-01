@@ -10,8 +10,9 @@ CREATE TABLE IF NOT EXISTS recordings (
     end_time    INTEGER NOT NULL,
     file_path   TEXT    NOT NULL UNIQUE,
     motion      INTEGER NOT NULL DEFAULT 0,
-    sprite_path TEXT,
-    faststart   INTEGER NOT NULL DEFAULT 0
+    sprite_path      TEXT,
+    faststart        INTEGER NOT NULL DEFAULT 0,
+    faststart_failed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_recordings_cam_date

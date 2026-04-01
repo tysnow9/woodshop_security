@@ -209,6 +209,9 @@ func (ix *Indexer) processFile(ctx context.Context, cam, serial, date, fullPath,
 	if err != nil {
 		return
 	}
+	if existing.FaststartFailed {
+		return // permanent failure — never retry
+	}
 	if !existing.Faststart {
 		ix.enqueue(ctx, workItem{kind: workFaststart, rowID: id, path: fullPath})
 	} else if existing.SpritePath == "" {
@@ -234,15 +237,21 @@ func (ix *Indexer) runWorker(ctx context.Context) {
 
 		switch item.kind {
 		case workFaststart:
+			// Cameras write moov at the END of the file (ftyp→free→[mdat...]→moov).
+			// runFaststart rewrites to moov-first so browsers can seek immediately.
+			// Confirmed needed: files without faststart fail to play in browser.
 			if err := runFaststart(ctx, item.path); err != nil {
 				log.Printf("[indexer] faststart %q: %v", item.path, err)
+				if dbErr := ix.db.SetFaststartFailed(item.rowID); dbErr != nil {
+					log.Printf("[indexer] SetFaststartFailed id=%d: %v", item.rowID, dbErr)
+				}
 				continue
 			}
 			if err := ix.db.SetFaststart(item.rowID, item.path); err != nil {
 				log.Printf("[indexer] SetFaststart id=%d: %v", item.rowID, err)
 				continue
 			}
-			// Faststart done — queue sprite.
+			// Queue sprite.
 			ix.enqueue(ctx, workItem{kind: workSprite, rowID: item.rowID, path: item.path})
 
 		case workSprite:

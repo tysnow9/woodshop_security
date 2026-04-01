@@ -17,16 +17,17 @@ type DB struct {
 
 // RecordingRow is one row from the recordings table.
 type RecordingRow struct {
-	ID         int64
-	Cam        string
-	Serial     string
-	Date       string
-	StartTime  time.Time
-	EndTime    time.Time
-	FilePath   string
-	Motion     bool
-	SpritePath string // empty string if NULL
-	Faststart  bool
+	ID              int64
+	Cam             string
+	Serial          string
+	Date            string
+	StartTime       time.Time
+	EndTime         time.Time
+	FilePath        string
+	Motion          bool
+	SpritePath      string // empty string if NULL
+	Faststart       bool
+	FaststartFailed bool   // true = permanent failure, skip retries
 }
 
 // OpenDB opens (or creates) the SQLite database at path and applies the schema.
@@ -48,6 +49,10 @@ func OpenDB(path string) (*DB, error) {
 	if _, err := sqlDB.Exec(schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+
+	// Migration: add faststart_failed column to existing databases.
+	// Silently ignored if the column already exists.
+	_, _ = sqlDB.Exec(`ALTER TABLE recordings ADD COLUMN faststart_failed INTEGER NOT NULL DEFAULT 0`)
 
 	return &DB{sql: sqlDB}, nil
 }
@@ -91,6 +96,18 @@ func (d *DB) UpsertRecording(r RecordingRow) (id int64, inserted bool, err error
 	return id, false, nil
 }
 
+// SetFaststartFailed marks a recording as permanently failed so the indexer
+// never re-queues it. Used for corrupt files (e.g. moov atom not found).
+func (d *DB) SetFaststartFailed(id int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.sql.Exec(
+		`UPDATE recordings SET faststart_failed=1 WHERE id=?`, id,
+	)
+	return err
+}
+
 // SetFaststart marks a recording as faststart-processed and updates its file path.
 func (d *DB) SetFaststart(id int64, filePath string) error {
 	d.mu.Lock()
@@ -122,7 +139,7 @@ func (d *DB) GetByID(id int64) (RecordingRow, error) {
 
 	row := d.sql.QueryRow(`SELECT
 		id, cam, serial, date, start_time, end_time,
-		file_path, motion, COALESCE(sprite_path,''), faststart
+		file_path, motion, COALESCE(sprite_path,''), faststart, faststart_failed
 		FROM recordings WHERE id=?`, id)
 
 	return scanRow(row)
@@ -135,7 +152,7 @@ func (d *DB) ListByDate(cam, date string) ([]RecordingRow, error) {
 
 	rows, err := d.sql.Query(`SELECT
 		id, cam, serial, date, start_time, end_time,
-		file_path, motion, COALESCE(sprite_path,''), faststart
+		file_path, motion, COALESCE(sprite_path,''), faststart, faststart_failed
 		FROM recordings WHERE cam=? AND date=? ORDER BY start_time ASC`,
 		cam, date,
 	)
@@ -198,12 +215,12 @@ type scanner interface {
 func scanRow(s scanner) (RecordingRow, error) {
 	var r RecordingRow
 	var startUnix, endUnix int64
-	var motionInt, faststartInt int
+	var motionInt, faststartInt, faststartFailedInt int
 
 	if err := s.Scan(
 		&r.ID, &r.Cam, &r.Serial, &r.Date,
 		&startUnix, &endUnix,
-		&r.FilePath, &motionInt, &r.SpritePath, &faststartInt,
+		&r.FilePath, &motionInt, &r.SpritePath, &faststartInt, &faststartFailedInt,
 	); err != nil {
 		return RecordingRow{}, err
 	}
@@ -212,5 +229,6 @@ func scanRow(s scanner) (RecordingRow, error) {
 	r.EndTime = time.Unix(endUnix, 0).UTC()
 	r.Motion = motionInt != 0
 	r.Faststart = faststartInt != 0
+	r.FaststartFailed = faststartFailedInt != 0
 	return r, nil
 }

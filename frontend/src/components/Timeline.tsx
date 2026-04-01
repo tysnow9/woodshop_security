@@ -1,14 +1,17 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RecordingSegment } from '../lib/types'
 
 interface TimelineProps {
   segments: RecordingSegment[]
-  date: string               // YYYY-MM-DD — defines day bounds for clamping
+  minMs: number              // left clamp bound (oldest available timestamp)
+  maxMs: number              // right clamp bound (live edge / now)
+  jumpToMs?: number          // when changed, snaps the view center to this timestamp
   currentTime: Date | null   // current playback position; null when live
   onSeek: (time: Date) => void
-  onLive: () => void
-  onScrubChange: (scrubbing: boolean, segment: RecordingSegment | null, frameIndex: number) => void
+  onScrubChange: (scrubbing: boolean, segment: RecordingSegment | null, frameIndex: number, timeMs: number) => void
+  onViewCenterChange?: (ms: number) => void  // fires each RAF with current needle time
   isLive: boolean
+  headerContent?: React.ReactNode  // rendered above the bar, same width as bar
   className?: string
 }
 
@@ -22,29 +25,14 @@ function xToTime(x: number, barWidth: number, centerMs: number, pps: number): nu
   return centerMs + ((x - barWidth / 2) / pps) * 1000
 }
 
-function clampPixelsPerSec(pps: number, barWidth: number): number {
-  const minPps = barWidth / (24 * 3600) // full day fits
-  const maxPps = barWidth / 120          // 2 minutes fills the bar
+function clampPixelsPerSec(pps: number, barWidth: number, totalRangeSec: number): number {
+  const minPps = barWidth / Math.max(totalRangeSec, 3600) // full range fits
+  const maxPps = barWidth / 120                           // 2 minutes fills the bar
   return Math.max(minPps, Math.min(maxPps, pps))
 }
 
-function localDayBounds(date: string): { dayStart: number; dayEnd: number } {
-  const [y, m, d] = date.split('-').map(Number)
-  return {
-    dayStart: new Date(y, m - 1, d).getTime(),       // local midnight
-    dayEnd:   new Date(y, m - 1, d + 1).getTime(),   // local next midnight
-  }
-}
-
-function clampCenter(centerMs: number, date: string): number {
-  const { dayStart, dayEnd } = localDayBounds(date)
-  return Math.max(dayStart, Math.min(dayEnd, centerMs))
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  })
+function clampCenter(centerMs: number, minMs: number, maxMs: number): number {
+  return Math.max(minMs, Math.min(maxMs, centerMs))
 }
 
 // ── Label helpers ───────────────────────────────────────────────────────────
@@ -60,21 +48,25 @@ function getVisibleLabels(
   centerMs: number,
   pixelsPerSec: number,
   barWidth: number,
-  date: string,
-): Array<{ ms: number; x: number; label: string }> {
+  minMs: number,
+  maxMs: number,
+): Array<{ ms: number; x: number; label: string; isDate: boolean }> {
   if (pixelsPerSec === 0) return []
   const intervalSec = getLabelIntervalSec(pixelsPerSec)
   const intervalMs = intervalSec * 1000
-  const { dayStart, dayEnd } = localDayBounds(date)
-  const firstMs  = Math.ceil(dayStart / intervalMs) * intervalMs
+  const firstMs = Math.ceil(minMs / intervalMs) * intervalMs
   const result = []
-  for (let ms = firstMs; ms <= dayEnd; ms += intervalMs) {
+  for (let ms = firstMs; ms <= maxMs; ms += intervalMs) {
     const x = timeToX(ms, barWidth, centerMs, pixelsPerSec)
     if (x < -40 || x > barWidth + 40) continue
     const dt = new Date(ms)
-    const h = dt.getHours().toString().padStart(2, '0')
-    const m = dt.getMinutes().toString().padStart(2, '0')
-    result.push({ ms, x, label: m === '00' ? h + ':00' : h + ':' + m })
+    const h = dt.getHours()
+    const m = dt.getMinutes()
+    const isDate = h === 0 && m === 0
+    const label = isDate
+      ? dt.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      : dt.getHours().toString().padStart(2, '0') + ':' + dt.getMinutes().toString().padStart(2, '0')
+    result.push({ ms, x, label, isDate })
   }
   return result
 }
@@ -83,12 +75,15 @@ function getVisibleLabels(
 
 export default function Timeline({
   segments,
-  date,
+  minMs,
+  maxMs,
+  jumpToMs,
   currentTime,
   onSeek,
-  onLive,
   onScrubChange,
+  onViewCenterChange,
   isLive,
+  headerContent,
   className,
 }: TimelineProps) {
   // Hot-path refs — never cause a React re-render directly
@@ -106,20 +101,30 @@ export default function Timeline({
   // Tracks previous interacting state so onScrubChange only fires on transitions.
   const wasInteractingRef  = useRef(false)
 
+  // Stable refs to props used inside RAF/event handlers (avoid stale closures)
+  const minMsRef         = useRef(minMs)
+  const maxMsRef         = useRef(maxMs)
+  const segmentsRef      = useRef(segments)
+  const onScrubChangeRef = useRef(onScrubChange)
+  const onSeekRef        = useRef(onSeek)
+  useEffect(() => { minMsRef.current = minMs }, [minMs])
+  useEffect(() => { maxMsRef.current = maxMs }, [maxMs])
+  useEffect(() => { segmentsRef.current = segments }, [segments])
+  useEffect(() => { onScrubChangeRef.current = onScrubChange }, [onScrubChange])
+  useEffect(() => { onSeekRef.current = onSeek }, [onSeek])
+
+  const onViewCenterChangeRef = useRef(onViewCenterChange)
+  useEffect(() => { onViewCenterChangeRef.current = onViewCenterChange }, [onViewCenterChange])
+
+  const isLiveRef = useRef(isLive)
+  useEffect(() => { isLiveRef.current = isLive }, [isLive])
+
   // State — synced from refs via RAF flush
   const [viewCenterMs, setViewCenterMs] = useState<number>(Date.now())
   const [pixelsPerSec, setPixelsPerSec] = useState<number>(0)
-  const [interacting, setInteracting]   = useState(false)
+  const [, setInteracting]   = useState(false)
 
   const barRef = useRef<HTMLDivElement>(null)
-
-  // Keep stable refs to props used inside RAF/event handlers to avoid stale closures
-  const segmentsRef      = useRef(segments)
-  const onScrubChangeRef = useRef(onScrubChange)
-  const dateRef          = useRef(date)
-  useEffect(() => { segmentsRef.current = segments }, [segments])
-  useEffect(() => { onScrubChangeRef.current = onScrubChange }, [onScrubChange])
-  useEffect(() => { dateRef.current = date }, [date])
 
   // ── RAF flush ────────────────────────────────────────────────────────────
 
@@ -145,11 +150,12 @@ export default function Timeline({
       setViewCenterMs(centerMs)
       setPixelsPerSec(pixelsPerSecRef.current)
       setInteracting(isInteracting)
+      onViewCenterChangeRef.current?.(centerMs)
 
       // Only notify parent when scrub state actually changes, not on every live tick.
       if (isInteracting !== wasInteractingRef.current || isInteracting) {
         wasInteractingRef.current = isInteracting
-        onScrubChangeRef.current(isInteracting, scrubSeg, scrubFrame)
+        onScrubChangeRef.current(isInteracting, scrubSeg, scrubFrame, centerMs)
       }
     })
   }
@@ -167,8 +173,7 @@ export default function Timeline({
     pixelsPerSecRef.current = pps
 
     if (isLive) {
-      const halfWindowMs = (barWidth / 2 / pps) * 1000
-      viewCenterMsRef.current = Date.now() - halfWindowMs
+      viewCenterMsRef.current = Date.now()
     } else {
       viewCenterMsRef.current = currentTime?.getTime() ?? Date.now()
     }
@@ -184,33 +189,35 @@ export default function Timeline({
       return
     }
 
-    // Entering live mode: clear the panned flag and snap view to live edge.
+    // Entering live mode: clear the panned flag and snap live edge to center.
     userHasPannedRef.current = false
-    const bar = barRef.current
-    if (bar && pixelsPerSecRef.current > 0) {
-      const barWidth = bar.getBoundingClientRect().width
-      const halfWindowMs = (barWidth / 2 / pixelsPerSecRef.current) * 1000
-      viewCenterMsRef.current = Date.now() - halfWindowMs
-      scheduleFlush()
-    }
+    viewCenterMsRef.current = Date.now()
+    scheduleFlush()
 
     liveTickRef.current = setInterval(() => {
       // Don't override user's manually scrolled position.
       if (userInteractingRef.current || userHasPannedRef.current) return
-      const bar = barRef.current
-      if (!bar || pixelsPerSecRef.current === 0) return
-      const barWidth = bar.getBoundingClientRect().width
-      const halfWindowMs = (barWidth / 2 / pixelsPerSecRef.current) * 1000
-      viewCenterMsRef.current = Date.now() - halfWindowMs
+      viewCenterMsRef.current = Date.now()
       scheduleFlush()
     }, 1000)
     return () => { if (liveTickRef.current) clearInterval(liveTickRef.current) }
   }, [isLive])
 
+  // ── Jump to timestamp (e.g. date picker) ─────────────────────────────────
+
+  useEffect(() => {
+    if (jumpToMs === undefined) return
+    viewCenterMsRef.current = clampCenter(jumpToMs, minMsRef.current, maxMsRef.current)
+    // In live mode, mark as panned so the live tick doesn't snap back.
+    // In playback mode, leave it clear so auto-scroll can follow currentTime.
+    userHasPannedRef.current = isLiveRef.current
+    scheduleFlush()
+  }, [jumpToMs])
+
   // ── Auto-scroll during playback ──────────────────────────────────────────
 
   useEffect(() => {
-    if (isLive || !currentTime || userInteractingRef.current) return
+    if (isLive || !currentTime || userInteractingRef.current || userHasPannedRef.current) return
     viewCenterMsRef.current = currentTime.getTime()
     scheduleFlush()
   }, [currentTime, isLive])
@@ -230,23 +237,26 @@ export default function Timeline({
       const rect     = bar!.getBoundingClientRect()
       const barWidth = rect.width
       const mouseX   = e.clientX - rect.left
+      const minMs    = minMsRef.current
+      const maxMs    = maxMsRef.current
+      const totalRangeSec = (maxMs - minMs) / 1000
 
       if (e.shiftKey) {
         const delta      = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX
         const zoomFactor = Math.pow(1.002, delta)
-        const newPps     = clampPixelsPerSec(pixelsPerSecRef.current * zoomFactor, barWidth)
+        const newPps     = clampPixelsPerSec(pixelsPerSecRef.current * zoomFactor, barWidth, totalRangeSec)
         const mouseTimeMs = xToTime(mouseX, barWidth, viewCenterMsRef.current, pixelsPerSecRef.current)
         pixelsPerSecRef.current = newPps
         viewCenterMsRef.current = clampCenter(
           mouseTimeMs - ((mouseX - barWidth / 2) / newPps) * 1000,
-          dateRef.current,
+          minMs, maxMs,
         )
       } else {
         const delta    = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         const deltaSec = delta / pixelsPerSecRef.current
         viewCenterMsRef.current = clampCenter(
           viewCenterMsRef.current + deltaSec * 1000,
-          dateRef.current,
+          minMs, maxMs,
         )
       }
 
@@ -254,12 +264,15 @@ export default function Timeline({
 
       interactTimerRef.current = setTimeout(() => {
         userInteractingRef.current = false
+        if (!isLiveRef.current) userHasPannedRef.current = false
+        scheduleFlush()
+        onSeekRef.current(new Date(viewCenterMsRef.current))
       }, 500)
     }
 
     bar.addEventListener('wheel', onWheel, { passive: false })
     return () => bar.removeEventListener('wheel', onWheel)
-  }, [date])
+  }, []) // stable — reads minMs/maxMs from refs
 
   // ── ResizeObserver ───────────────────────────────────────────────────────
 
@@ -291,7 +304,7 @@ export default function Timeline({
     const deltaSec = dx / pixelsPerSecRef.current
     viewCenterMsRef.current = clampCenter(
       viewCenterMsRef.current - deltaSec * 1000,
-      date,
+      minMs, maxMs,
     )
     scheduleFlush()
   }
@@ -299,10 +312,14 @@ export default function Timeline({
   function handlePointerUp(_e: React.PointerEvent<HTMLDivElement>) {
     if (!userInteractingRef.current) return
     lastPointerXRef.current = null
+    if (interactTimerRef.current) clearTimeout(interactTimerRef.current)
+    userInteractingRef.current = false
+    // In playback mode, clear the panned flag so auto-scroll resumes following
+    // currentTime after the seek. In live mode, keep it set so the live tick
+    // doesn't snap the view back while the user is exploring.
+    if (!isLiveRef.current) userHasPannedRef.current = false
+    scheduleFlush()
     onSeek(new Date(viewCenterMsRef.current))
-    interactTimerRef.current = setTimeout(() => {
-      userInteractingRef.current = false
-    }, 2000)
   }
 
   // ── Derived: nearby segments for sprite pre-fetch ────────────────────────
@@ -319,9 +336,12 @@ export default function Timeline({
   const barWidth = barRef.current?.clientWidth ?? 0
 
   return (
-    <div className={`flex items-center gap-3 px-3 pb-3 pt-1 ${className ?? ''}`}>
+    <div className={`px-3 pb-3 pt-1 ${className ?? ''}`}>
       {/* Timeline */}
-      <div className="flex-1 flex flex-col" style={{ overflow: 'visible' }}>
+      <div className="flex flex-col" style={{ overflow: 'visible' }}>
+
+        {/* Header slot — same width as bar, rendered above it */}
+        {headerContent}
 
         {/* Bar area */}
         <div
@@ -343,7 +363,7 @@ export default function Timeline({
                 className={`absolute top-0 h-full ${seg.motion ? 'bg-amber-600/70' : 'bg-sky-700/60'}`}
                 style={{
                   left:  Math.max(0, x1),
-                  width: Math.max(2, Math.min(barWidth, x2) - Math.max(0, x1)), // min 2px so tiny segments are visible
+                  width: Math.max(2, Math.min(barWidth, x2) - Math.max(0, x1)),
                 }}
               />
             )
@@ -362,7 +382,7 @@ export default function Timeline({
           )}
 
           {/* Live edge indicator */}
-          {isLive && pixelsPerSec > 0 && (() => {
+          {pixelsPerSec > 0 && (() => {
             const liveX = timeToX(Date.now(), barWidth, viewCenterMs, pixelsPerSec)
             if (liveX < 0 || liveX > barWidth) return null
             return (
@@ -374,23 +394,18 @@ export default function Timeline({
             )
           })()}
 
-          {/* Scrub time label above center needle */}
-          {interacting && (
-            <div className="absolute bottom-full mb-2 z-50 pointer-events-none"
-                 style={{ left: '50%', transform: 'translateX(-50%)' }}>
-              <div className="bg-zinc-900/90 border border-zinc-700 rounded px-2 py-0.5 text-xs text-zinc-200 shadow whitespace-nowrap">
-                {formatTime(viewCenterMs)}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Dynamic time labels */}
         <div className="relative h-5 overflow-hidden">
-          {getVisibleLabels(viewCenterMs, pixelsPerSec, barWidth, date).map(({ ms, x, label }) => (
+          {getVisibleLabels(viewCenterMs, pixelsPerSec, barWidth, minMs, maxMs).map(({ ms, x, label, isDate }) => (
             <span
               key={ms}
-              className="absolute text-[10px] text-zinc-500 -translate-x-1/2 whitespace-nowrap"
+              className={`absolute -translate-x-1/2 whitespace-nowrap ${
+                isDate
+                  ? 'text-xs text-zinc-200 font-medium'
+                  : 'text-xs text-zinc-400'
+              }`}
               style={{ left: x }}
             >
               {label}
@@ -405,18 +420,6 @@ export default function Timeline({
           ))}
         </div>
       </div>
-
-      {/* Live button */}
-      <button
-        onClick={onLive}
-        className={`shrink-0 px-3 py-1.5 rounded text-[11px] font-semibold uppercase tracking-wider border transition-colors ${
-          isLive
-            ? 'bg-red-950/60 text-red-400 border-red-900/50 cursor-default'
-            : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-sky-600 hover:text-sky-400'
-        }`}
-      >
-        {isLive ? '● Live' : 'Go Live'}
-      </button>
     </div>
   )
 }

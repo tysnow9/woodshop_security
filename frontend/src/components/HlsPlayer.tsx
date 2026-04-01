@@ -6,6 +6,8 @@ type Status = 'loading' | 'playing' | 'error'
 
 export interface HlsPlayerHandle {
   setMuted: (muted: boolean) => void
+  pause: () => void
+  resume: () => void
 }
 
 interface Props {
@@ -28,6 +30,14 @@ const HlsPlayer = forwardRef<HlsPlayerHandle, Props>(function HlsPlayer(
   useImperativeHandle(ref, () => ({
     setMuted: (muted: boolean) => {
       if (videoRef.current) videoRef.current.muted = muted
+    },
+    pause: () => {
+      hlsRef.current?.stopLoad()
+      videoRef.current?.pause()
+    },
+    resume: () => {
+      if (hlsRef.current) hlsRef.current.startLoad(-1)
+      videoRef.current?.play().catch(() => {})
     },
   }))
 
