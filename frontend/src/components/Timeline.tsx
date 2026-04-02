@@ -236,7 +236,6 @@ export default function Timeline({
 
       const rect     = bar!.getBoundingClientRect()
       const barWidth = rect.width
-      const mouseX   = e.clientX - rect.left
       const minMs    = minMsRef.current
       const maxMs    = maxMsRef.current
       const totalRangeSec = (maxMs - minMs) / 1000
@@ -244,13 +243,8 @@ export default function Timeline({
       if (e.shiftKey) {
         const delta      = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX
         const zoomFactor = Math.pow(1.002, delta)
-        const newPps     = clampPixelsPerSec(pixelsPerSecRef.current * zoomFactor, barWidth, totalRangeSec)
-        const mouseTimeMs = xToTime(mouseX, barWidth, viewCenterMsRef.current, pixelsPerSecRef.current)
-        pixelsPerSecRef.current = newPps
-        viewCenterMsRef.current = clampCenter(
-          mouseTimeMs - ((mouseX - barWidth / 2) / newPps) * 1000,
-          minMs, maxMs,
-        )
+        pixelsPerSecRef.current = clampPixelsPerSec(pixelsPerSecRef.current * zoomFactor, barWidth, totalRangeSec)
+        // viewCenterMsRef.current intentionally unchanged — zoom anchors to the needle
       } else {
         const delta    = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         const deltaSec = delta / pixelsPerSecRef.current
@@ -285,6 +279,21 @@ export default function Timeline({
   }, [])
 
   // ── Pointer handlers (pan + seek) ────────────────────────────────────────
+
+  function handleDoubleClick(e: React.MouseEvent<HTMLDivElement>) {
+    const bar = barRef.current
+    if (!bar) return
+    const rect     = bar.getBoundingClientRect()
+    const clickX   = e.clientX - rect.left
+    const clickMs  = clampCenter(
+      xToTime(clickX, rect.width, viewCenterMsRef.current, pixelsPerSecRef.current),
+      minMsRef.current, maxMsRef.current,
+    )
+    viewCenterMsRef.current = clickMs
+    userHasPannedRef.current = isLiveRef.current
+    scheduleFlush()
+    onSeekRef.current(new Date(clickMs))
+  }
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -348,6 +357,7 @@ export default function Timeline({
           ref={barRef}
           className="relative h-11 bg-zinc-900 rounded cursor-ew-resize select-none"
           style={{ overflow: 'visible', touchAction: 'none' }}
+          onDoubleClick={handleDoubleClick}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}

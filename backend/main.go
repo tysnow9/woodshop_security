@@ -165,6 +165,25 @@ func main() {
 			SpriteURL   string `json:"spriteUrl"`
 		}
 
+		// Resolve R/M overlaps: when a segment's end time overlaps with the
+		// next segment's start time (e.g. R clip has a ~5s tail into an M clip),
+		// trim the earlier segment's end time to the next segment's start.
+		// Drop any segment that becomes shorter than 5 seconds after trimming.
+		const minDurationSec = 5
+		{
+			n := 0
+			for i := range rows {
+				if i+1 < len(rows) && rows[i].EndTime.After(rows[i+1].StartTime) {
+					rows[i].EndTime = rows[i+1].StartTime
+				}
+				if int(rows[i].EndTime.Sub(rows[i].StartTime).Seconds()) >= minDurationSec {
+					rows[n] = rows[i]
+					n++
+				}
+			}
+			rows = rows[:n]
+		}
+
 		segs := make([]segment, 0, len(rows))
 		for _, r := range rows {
 			// Skip rows whose files were deleted (e.g. by the retention cleaner

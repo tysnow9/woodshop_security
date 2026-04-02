@@ -30,6 +30,7 @@ export default function CameraPage() {
   const [selectedDate, setSelectedDate]   = useState<string>(() => localDateStr())
   const [playbackReady, setPlaybackReady] = useState(false)
   const [allSegments, setAllSegments]     = useState<RecordingSegment[]>([])
+  const [availableDates, setAvailableDates] = useState<string[]>([])
   const [jumpToMs, setJumpToMs]           = useState<number | undefined>(undefined)
   const [currentSegment, setCurrentSegment] = useState<RecordingSegment | null>(null)
   const [seekOffset, setSeekOffset]       = useState(0)
@@ -55,7 +56,13 @@ export default function CameraPage() {
   const [isPaused,      setIsPaused]      = useState(true)
   const [isReversing,   setIsReversing]   = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
-  const reverseIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const reverseIntervalRef  = useRef<ReturnType<typeof setInterval> | null>(null)
+  const holdPlayingRef      = useRef<'forward' | 'reverse' | null>(null)
+  // Refs for stale-closure–safe access inside intervals/effects
+  const playbackTimeRef     = useRef<Date | null>(null)   // kept in sync with playbackTime
+  const currentSegmentRef   = useRef<RecordingSegment | null>(null)
+  const allSegmentsRef      = useRef<RecordingSegment[]>([])
+  const pendingReverseRef   = useRef(false)               // true = resume reversing after load
 
   // ── Fullscreen ────────────────────────────────────────────────────────────
 
@@ -64,6 +71,10 @@ export default function CameraPage() {
     document.addEventListener('fullscreenchange', onFsc)
     return () => document.removeEventListener('fullscreenchange', onFsc)
   }, [])
+
+  useEffect(() => { playbackTimeRef.current   = playbackTime   }, [playbackTime])
+  useEffect(() => { currentSegmentRef.current = currentSegment }, [currentSegment])
+  useEffect(() => { allSegmentsRef.current    = allSegments    }, [allSegments])
 
   function toggleFullscreen() {
     if (document.fullscreenElement) {
@@ -89,6 +100,7 @@ export default function CameraPage() {
   useEffect(() => {
     if (!camera) return
     api.recordings.listDates(camera.id).then(r => {
+      setAvailableDates(r.dates)
       if (r.dates.length === 0) return
       // Default selected date to most recent if today has no recordings.
       const today = localDateStr()
@@ -117,6 +129,9 @@ export default function CameraPage() {
       const today = localDateStr()
       api.recordings.listByDate(camera.id, today)
         .then(r => {
+          if (r.segments.length > 0) {
+            setAvailableDates(dates => dates.includes(today) ? dates : [today, ...dates])
+          }
           setAllSegments(prev => {
             const existing = new Set(prev.map(s => s.id))
             const newSegs = r.segments.filter(s => !existing.has(s.id))
@@ -155,8 +170,14 @@ export default function CameraPage() {
     function onCanPlay() {
       video.currentTime = targetOffset
       video.playbackRate = playbackRate
-      video.play().catch(() => {})
       setPlaybackReady(true)
+      if (pendingReverseRef.current) {
+        // Segment loaded for a reverse-boundary transition — resume reversing.
+        pendingReverseRef.current = false
+        setIsReversing(true)
+      } else {
+        video.play().catch(() => {})
+      }
       cleanup()
     }
     // If canplay never fires (e.g. corrupt file), show whatever the video
@@ -199,6 +220,19 @@ export default function CameraPage() {
     const idx = allSegments.findIndex(s => s.id === currentSegment.id)
 
     function onTimeUpdate() {
+      // Advance early when we reach the trimmed end of this segment.
+      // Handles R clips whose EndTime was trimmed to the next M clip's StartTime:
+      // the video file still contains the original (longer) recording, but we
+      // cut away early so playback transitions cleanly without jumping backward.
+      if (video.currentTime >= currentSegment!.durationSec - 0.1 && idx >= 0) {
+        const next = allSegments[idx + 1]
+        if (next) {
+          setCurrentSegment(next)
+          setSeekOffset(0)
+          preloadRef.current = null
+          return
+        }
+      }
       const remaining = currentSegment!.durationSec - video.currentTime
       if (remaining < 30 && !preloadRef.current && idx >= 0) {
         const next = allSegments[idx + 1]
@@ -244,7 +278,7 @@ export default function CameraPage() {
 
   // Reverse playback: step currentTime backwards on a fixed interval.
   // Each tick steps back (playbackRate × 0.2)s so reverse tracks the speed setting.
-  // Stops at start of segment rather than crossing boundaries.
+  // At the start of a segment, transitions to the previous segment's end.
   useEffect(() => {
     if (reverseIntervalRef.current) {
       clearInterval(reverseIntervalRef.current)
@@ -259,8 +293,20 @@ export default function CameraPage() {
       const v = playbackVideoRef.current
       if (!v) return
       if (v.currentTime <= stepSec) {
-        v.currentTime = 0
-        setIsReversing(false)
+        // Reached start — jump to end of previous segment and keep reversing.
+        const seg  = currentSegmentRef.current
+        const segs = allSegmentsRef.current
+        const idx  = seg ? segs.findIndex(s => s.id === seg.id) : -1
+        const prev = idx > 0 ? segs[idx - 1] : null
+        if (prev) {
+          pendingReverseRef.current = true
+          setIsReversing(false)           // stops this interval; load effect will restart it
+          setCurrentSegment(prev)
+          setSeekOffset(prev.durationSec)
+        } else {
+          v.currentTime = 0
+          setIsReversing(false)
+        }
       } else {
         v.currentTime -= stepSec
       }
@@ -303,20 +349,78 @@ export default function CameraPage() {
         case 'k': case 'K':
           if (mode === 'playback') setPlaybackRate(1)
           break
-        case 'ArrowRight':
-          if (mode === 'playback' && currentSegment) {
-            const idx = allSegments.findIndex(s => s.id === currentSegment.id)
-            const next = allSegments[idx + 1]
-            if (next) { setCurrentSegment(next); setSeekOffset(0) }
+        case 'ArrowRight': {
+          e.preventDefault()
+          if (mode !== 'playback' || !playbackVideoRef.current) break
+          const video = playbackVideoRef.current
+          if (e.shiftKey) {
+            // Snap to next motion clip midpoint.
+            // Use playbackTimeRef (set synchronously by handleSeek) so rapid presses
+            // work correctly even when video.currentTime hasn't seeked yet.
+            const currentMs = playbackTimeRef.current?.getTime()
+              ?? (currentSegment ? new Date(currentSegment.startTime).getTime() : 0)
+            const next = allSegments.find(s => {
+              if (!s.motion) return false
+              const mid = (new Date(s.startTime).getTime() + new Date(s.endTime).getTime()) / 2
+              return mid > currentMs
+            })
+            if (next) {
+              const mid = (new Date(next.startTime).getTime() + new Date(next.endTime).getTime()) / 2
+              handleSeek(new Date(mid))
+              setJumpToMs(mid)
+            }
+          } else if (e.repeat) {
+            // Hold: play forward
+            if (!holdPlayingRef.current) {
+              holdPlayingRef.current = 'forward'
+              setIsReversing(false)
+              video.play().catch(() => {})
+            }
+          } else {
+            // Tap: step 1 frame forward (camera is 20fps)
+            setIsReversing(false)
+            video.currentTime = Math.min(
+              video.currentTime + 1 / 20,
+              currentSegment ? currentSegment.durationSec : video.duration,
+            )
           }
           break
-        case 'ArrowLeft':
-          if (mode === 'playback' && currentSegment) {
-            const idx = allSegments.findIndex(s => s.id === currentSegment.id)
-            const prev = allSegments[idx - 1]
-            if (prev) { setCurrentSegment(prev); setSeekOffset(0) }
+        }
+        case 'ArrowLeft': {
+          e.preventDefault()
+          if (mode !== 'playback' || !playbackVideoRef.current) break
+          const video = playbackVideoRef.current
+          if (e.shiftKey) {
+            // Snap to previous motion clip midpoint.
+            // Use playbackTimeRef (set synchronously by handleSeek) so rapid presses
+            // work correctly even when video.currentTime hasn't seeked yet.
+            const currentMs = playbackTimeRef.current?.getTime()
+              ?? (currentSegment ? new Date(currentSegment.startTime).getTime() : 0)
+            const prev = [...allSegments].reverse().find(s => {
+              if (!s.motion) return false
+              if (s.id === currentSegment?.id) return false  // already here — skip to the one before
+              const mid = (new Date(s.startTime).getTime() + new Date(s.endTime).getTime()) / 2
+              return mid < currentMs
+            })
+            if (prev) {
+              const mid = (new Date(prev.startTime).getTime() + new Date(prev.endTime).getTime()) / 2
+              handleSeek(new Date(mid))
+              setJumpToMs(mid)
+            }
+          } else if (e.repeat) {
+            // Hold: play in reverse
+            if (!holdPlayingRef.current) {
+              holdPlayingRef.current = 'reverse'
+              video.pause()
+              setIsReversing(true)
+            }
+          } else {
+            // Tap: step 1 frame backward
+            setIsReversing(false)
+            video.currentTime = Math.max(0, video.currentTime - 1 / 20)
           }
           break
+        }
         case 'Home':
           if (allSegments.length > 0) { setCurrentSegment(allSegments[0]); setSeekOffset(0); setMode('playback') }
           break
@@ -325,8 +429,25 @@ export default function CameraPage() {
           break
       }
     }
+
+    function onKeyUp(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (mode !== 'playback') return
+      if (e.key === 'ArrowRight' && holdPlayingRef.current === 'forward') {
+        holdPlayingRef.current = null
+        playbackVideoRef.current?.pause()
+      } else if (e.key === 'ArrowLeft' && holdPlayingRef.current === 'reverse') {
+        holdPlayingRef.current = null
+        setIsReversing(false)
+      }
+    }
+
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
   }, [mode, currentSegment, allSegments, isReversing])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -375,14 +496,17 @@ export default function CameraPage() {
     setSeekOffset(offset)
     setMode('playback')
     setPlaybackTime(time)
+    playbackTimeRef.current = time  // sync for keyboard handler rapid presses
     setPlaybackRate(1)
   }
 
   function handleGoLive() {
     setIsReversing(false)
+    pendingReverseRef.current = false
     setMode('live')
     setCurrentSegment(null)
     setPlaybackTime(null)
+    playbackTimeRef.current = null
     setPlaybackRate(1)
     setPlaybackReady(false)
     preloadRef.current = null
@@ -599,10 +723,8 @@ export default function CameraPage() {
               <div className="flex items-center py-1 mb-0.5">
                 {/* Left: date picker + playback controls, right-aligned */}
                 <div className="flex-1 flex items-center gap-2 justify-end pr-3">
-                  <input
-                    type="date"
+                  <select
                     value={selectedDate}
-                    max={localDateStr()}
                     onChange={e => {
                       const d = e.target.value
                       if (!d) return
@@ -621,7 +743,16 @@ export default function CameraPage() {
                       }
                     }}
                     className="bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-500 px-2 py-1 focus:outline-none focus:border-zinc-600"
-                  />
+                  >
+                    {availableDates.map(d => {
+                      const dt = new Date(d + 'T12:00:00')
+                      return (
+                        <option key={d} value={d}>
+                          {dt.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+                        </option>
+                      )
+                    })}
+                  </select>
 
                   {/* Playback controls */}
                   <div className="flex items-center gap-1">
@@ -683,7 +814,7 @@ export default function CameraPage() {
                         <HelpCircle size={12} />
                       </button>
                       {showShortcuts && (
-                        <div className="absolute bottom-full right-0 mb-1 w-52 bg-zinc-900 border border-zinc-700 rounded shadow-xl p-2 z-50 text-[11px] text-zinc-400">
+                        <div className="absolute bottom-full right-0 mb-1 w-56 bg-zinc-900 border border-zinc-700 rounded shadow-xl p-2 z-50 text-[11px] text-zinc-400">
                           <table className="w-full">
                             <tbody>
                               {([
@@ -691,7 +822,8 @@ export default function CameraPage() {
                                 ['J', '−10 seconds'],
                                 ['K', 'Reset speed to 1×'],
                                 ['L', 'Speed up'],
-                                ['← →', 'Previous / next clip'],
+                                ['← →', 'Step frame / hold to play'],
+                                ['⇧← ⇧→', 'Prev / next motion clip'],
                                 ['Home', 'First recording'],
                                 ['End', 'Go live'],
                               ] as [string, string][]).map(([key, desc]) => (
